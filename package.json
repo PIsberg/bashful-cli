@@ -1,0 +1,14 @@
+{
+  "name": "bashful",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun run bashful.ts pipe curl --help",
+    "dev": "bun run bashful.ts pipe curl --help"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/bun": "^1.1.14",
+    "typescript": "~5.8.2"
+  }
+}

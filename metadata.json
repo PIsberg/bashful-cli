@@ -1,0 +1,5 @@
+{
+  "name": "Bashful",
+  "description": "A CLI-to-REST Auto-Wrapper that dynamically generates a REST API from a command-line tool's --help output.",
+  "requestFramePermissions": []
+}

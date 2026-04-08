@@ -3,8 +3,9 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "bun run bashful.ts pipe curl --help",
-    "dev": "bun run bashful.ts pipe curl --help"
+    "start": "bun run bashful.ts curl",
+    "dev": "bun run bashful.ts curl",
+    "test": "bun test"
   },
   "dependencies": {},
   "devDependencies": {

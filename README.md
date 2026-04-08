@@ -1,98 +1,140 @@
 # Bashful
 
-A CLI-to-REST Auto-Wrapper that dynamically generates a REST API from a command-line tool's `--help` output.
+**Bashful** gives your CLI tools a REST API — no code required.
 
-Bashful parses the `--help` output of any CLI tool, extracts its arguments and flags, and spins up a local REST API that you can use to execute the tool via HTTP requests.
+The name is a double meaning: it wraps **bash**ful tools (tools that only speak shell), and it does so quietly, without you having to write a single line of server code. You hand it a command name, and Bashful reads the `--help` output, figures out the flags, and instantly serves a REST API and a browser UI you can poke at.
+
+Think of it as a shy CLI tool finding its voice over HTTP.
+
+---
+
+## What it does
+
+Most command-line tools are only accessible from a terminal. Bashful bridges that gap:
+
+1. **Reads** the tool's `--help` output at startup.
+2. **Parses** every flag — short (`-s`), long (`--silent`), typed (`--output <file>`), and boolean — into a JSON schema.
+3. **Serves** a local REST API where each JSON key maps back to a CLI flag.
+4. **Executes** the real command when you POST to the endpoint, streaming the output back as plain text.
+5. **Shows** a browser UI (Swagger-style) auto-generated from the parsed schema so you can fill in flags and run commands without touching a terminal.
+
+No config files. No code. Starts in milliseconds.
+
+---
 
 ## Prerequisites
 
-- Bun (v1.0+ recommended)
+- [Bun](https://bun.sh/) v1.0+
 
-## How to Run
-
-1. Install dependencies (if not already done):
-
-Linux
-   ```bash
-   bun install
-   ```
-Windows
- ```powershell -c "irm bun.sh/install.ps1 | iex"   
+Install on Linux/macOS:
+```bash
+curl -fsSL https://bun.sh/install | bash
 ```
 
-2. Start Bashful by passing the command you want to wrap. For example, to wrap `curl`:
-   ```bash
-   bun run start
-   ```
-   Or manually:
-   ```bash
-   bun run bashful.ts pipe curl --help
-   ```
-   *Note: `pipe <command> --help` is used to explicitly pass the help text command.*
+Install on Windows:
+```powershell
+powershell -c "irm bun.sh/install.ps1 | iex"
+```
 
-3. The server will start on port 3000.
+---
 
-
-### Test
-
- Invoke-WebRequest -Uri http://localhost:3000/curl -Method POST -ContentType "application/json" -Body '{"_args": ["http://example.com"]}'
-
-  Or prefix with !  to run it in the bash shell:
-
-  ! curl -X POST http://localhost:3000/curl -H "Content-Type: application/json" -d '{"_args": ["http://example.com"]}'
-
-### Debugging
-
-To enable logging (including startup time, parsed schema, and execution details), pass the `--debug` flag when starting Bashful:
+## Quick start
 
 ```bash
-bun run bashful.ts --debug pipe curl --help
+bun install
+bun run bashful.ts curl
 ```
 
-## Usage
-
-Once the server is running, you can interact with it via HTTP.
-
-### 1. Web UI (Swagger-like)
-
-You can access a dynamically generated, simplistic UI to interact with the command directly from your browser.
-
-Open your browser and navigate to:
-```
-http://localhost:3000/
-```
-
-### 2. View the Generated Schema
-
-Get the parsed schema of the CLI tool's arguments:
+Then open `http://localhost:3000` in your browser, or:
 
 ```bash
+# Get the parsed flag schema
 curl http://localhost:3000/curl/schema
-```
 
-### 2. Execute the Command
-
-Send a POST request with a JSON payload containing the flags and arguments you want to pass to the tool.
-
-```bash
+# Execute curl via HTTP
 curl -X POST http://localhost:3000/curl \
   -H "Content-Type: application/json" \
-  -d '{
-    "silent": true,
-    "output": "example.html",
-    "_args": ["http://example.com"]
-  }'
+  -d '{"silent": true, "output": "example.html", "_args": ["http://example.com"]}'
 ```
 
-This will execute: `curl --silent --output example.html http://example.com`
+That POST translates to: `curl --silent --output example.html http://example.com`
 
-- Use `_args` for positional arguments.
-- Boolean flags (e.g., `"silent": true`) will be passed as `--silent`.
-- Key-value flags (e.g., `"output": "example.html"`) will be passed as `--output example.html`.
+---
+
+## Multiple commands
+
+Use `\|` to wrap several tools at once. Each gets its own endpoint and a tab in the UI:
+
+```bash
+bun run bashful.ts curl \| wget \| ping
+```
+
+Endpoints created:
+- `POST /curl` — execute curl
+- `POST /wget` — execute wget
+- `POST /ping` — execute ping
+- `GET /<cmd>/schema` — parsed flag schema for each
+
+---
+
+## Invocation modes
+
+**Direct mode** — Bashful appends `--help` automatically:
+```bash
+bun run bashful.ts curl
+```
+
+**Pipe mode** — provide the exact help command yourself (useful when `--help` fails or outputs to stderr):
+```bash
+bun run bashful.ts curl --help
+bun run bashful.ts git log --help
+```
+
+Both modes can be mixed when using `\|`:
+```bash
+bun run bashful.ts curl --help \| wget
+```
+
+---
+
+## Payload conventions (`POST /<command>`)
+
+| Payload key | CLI result |
+|---|---|
+| `_args: ["http://example.com"]` | positional args, prepended before flags |
+| `"silent": true` | `--silent` |
+| `"output": "file.html"` | `--output file.html` |
+| `"v": true` | `-v` (single-char keys become short flags) |
+| `"silent": false` | *(omitted)* |
+
+---
+
+## Debug mode
+
+Pass `--debug` anywhere before the command to log startup time, parsed flag counts, and each execution:
+
+```bash
+bun run bashful.ts --debug curl \| wget
+```
+
+---
+
+## Running tests
+
+```bash
+bun test
+```
+
+Tests cover the three pure functions at the core of Bashful: `splitSegments` (arg parsing), `parseSchema` (regex-based help text parsing), and `buildCLIArgs` (payload → CLI translation).
+
+---
 
 ## Architecture
 
-- **Ingestion**: Executes `<command> --help` and captures the output.
-- **Schema Synthesis**: Uses a heuristic regex to parse short flags, long flags, types, and descriptions into a JSON schema.
-- **Dynamic Scaffolding**: Spins up a Node.js HTTP server.
-- **Execution**: Translates incoming JSON payloads back into CLI arguments and executes them using `child_process.spawn`.
+Everything lives in a single file: `bashful.ts`.
+
+- **`splitSegments(args)`** — splits CLI args on `|` into per-command segments.
+- **`parseSchema(helpText)`** — the "Bashful Regex" extracts short flags, long flags, value types (`<val>`, `[val]`, `ALL_CAPS`), and descriptions into a keyed schema object.
+- **`buildCLIArgs(payload, schema)`** — translates a JSON payload back into a flat CLI argument array.
+- **Server** — `Bun.serve` on port 3000. Routes: `GET /` (UI), `GET /<cmd>/schema`, `POST /<cmd>`.
+- **Execution** — `Bun.spawn` runs the real command and streams stdout directly as the HTTP response.

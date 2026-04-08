@@ -5,14 +5,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-bun install                                    # Install dependencies
-bun run bashful.ts <command>                   # Wrap a command using --help
-bun run bashful.ts pipe <command> --help       # Explicit help text piping
-bun run bashful.ts --debug pipe curl --help    # Run with debug logging
-bun run start                                  # Alias: wraps curl via pipe mode
+bun install                                         # Install dependencies
+bun run bashful.ts <command>                        # Wrap a command using --help
+bun run bashful.ts curl \| wget                     # Multiple commands, one endpoint each
+bun run bashful.ts curl --help \| wget --help       # Explicit help commands (pipe mode)
+bun run bashful.ts --debug curl \| wget             # Run with debug logging
+bun run start                                       # Alias: wraps curl
 ```
 
-There are no tests in this project.
+```bash
+bun test                                            # Run all tests
+```
 
 ## Architecture
 
@@ -33,8 +36,8 @@ The entire application lives in a single file: `bashful.ts`.
 - Value flags: `{ "output": "file.html" }` → `--output file.html`
 - Unknown single-char keys fall back to `-x` short-flag style.
 
-**Two invocation modes:**
-- Direct: `bashful.ts curl` — runs `curl --help` internally.
-- Pipe: `bashful.ts pipe curl --help` — runs the full provided command to get help text (useful when `--help` alone fails or outputs to stderr).
+**Multiple commands:** Separate commands with `\|` (escaped pipe character). Each segment becomes its own endpoint and tab in the UI.
+- `bashful.ts curl \| wget` — two endpoints: `/curl` and `/wget`
+- `bashful.ts curl --help \| wget --help` — pipe mode per segment: runs the full command as-is to get help text (useful when `--help` alone fails or outputs to stderr)
 
 **`--debug` flag:** logs startup time, number of parsed flags, and each execution command.

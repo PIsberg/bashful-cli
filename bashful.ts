@@ -297,37 +297,37 @@ if (import.meta.main) {
         return new Response(null, { status: 204, headers: corsHeaders });
       }
 
-      const url = new URL(req.url);
+      const pathStart = req.url.indexOf('/', 8);
+      const fullPath = pathStart !== -1 ? req.url.slice(pathStart) : '/';
+      const searchStart = fullPath.indexOf('?');
+      const pathname = searchStart !== -1 ? fullPath.slice(0, searchStart) : fullPath;
 
-      if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/docs' || url.pathname === '/ui')) {
+      if (req.method === 'GET' && (pathname === '/' || pathname === '/docs' || pathname === '/ui')) {
         return new Response(swaggerHtml, {
           headers: { ...corsHeaders, 'Content-Type': 'text/html' }
         });
       }
 
-      const schemaMatch = url.pathname.match(/^\/([^/]+)\/schema$/);
-      if (req.method === 'GET' && schemaMatch) {
-        const cmdName = schemaMatch[1];
-        const schemaString = serializedSchemas.get(cmdName);
-        if (schemaString) {
-          return new Response(schemaString, {
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-          });
-        }
-      }
+      const parts = pathname.substring(1).split('/');
+      const cmdName = parts[0];
 
-      const execMatch = url.pathname.match(/^\/([^/]+)$/);
-      if ((req.method === 'POST' || req.method === 'GET') && execMatch) {
-        const cmdName = execMatch[1];
-        const schema = commandMap.get(cmdName);
-        if (schema !== undefined) {
+      if (commandMap.has(cmdName)) {
+        if (req.method === 'GET' && parts[1] === 'schema') {
+          const schemaString = serializedSchemas.get(cmdName);
+          if (schemaString) {
+            return new Response(schemaString, {
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+          }
+        } else if (parts.length === 1 && (req.method === 'POST' || req.method === 'GET')) {
+          const schema = commandMap.get(cmdName)!;
           try {
             let payload: Record<string, any> = {};
             if (req.method === 'POST') {
-              const text = await req.text();
-              if (text) payload = JSON.parse(text);
+              payload = await req.json().catch(() => ({}));
             } else {
-              for (const [key, value] of url.searchParams.entries()) {
+              const qs = searchStart !== -1 ? fullPath.slice(searchStart) : '';
+              for (const [key, value] of new URLSearchParams(qs).entries()) {
                 payload[key] = value;
               }
             }

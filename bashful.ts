@@ -75,22 +75,21 @@ if (import.meta.main) {
 
   const segments = splitSegments(args);
 
-  const commands: Array<{ name: string; schema: Record<string, any> }> = [];
-
-  for (const segment of segments) {
+  const commandPromises = segments.map(async (segment) => {
     const name = segment[0];
-    let helpText = '';
-    if (segment.length === 1) {
-      const proc = Bun.spawnSync([name, '--help'], { stdout: 'pipe', stderr: 'pipe' });
-      helpText = (proc.stdout?.toString() ?? '') + (proc.stderr?.toString() ?? '');
-    } else {
-      const proc = Bun.spawnSync(segment, { stdout: 'pipe', stderr: 'pipe' });
-      helpText = (proc.stdout?.toString() ?? '') + (proc.stderr?.toString() ?? '');
-    }
+    const args = segment.length === 1 ? [name, '--help'] : segment;
+    
+    const proc = Bun.spawn(args, { stdout: 'pipe', stderr: 'pipe' });
+    const stdout = await new Response(proc.stdout).text();
+    const stderr = await new Response(proc.stderr).text();
+    const helpText = stdout + stderr;
+    
     const schema = parseSchema(helpText);
     if (isDebug) console.log(`[Bashful] Parsed schema for '${name}':`, Object.keys(schema).length, 'flags found.');
-    commands.push({ name, schema });
-  }
+    return { name, schema };
+  });
+
+  const commands = await Promise.all(commandPromises);
 
   const commandNames = commands.map(c => c.name);
 

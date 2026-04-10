@@ -5,7 +5,7 @@ export function splitSegments(args: string[]): string[][] {
   const segments: string[][] = [];
   let current: string[] = [];
   for (const arg of args) {
-    if (arg === '|') {
+    if (arg === '|' || arg === '\\|') {
       if (current.length > 0) { segments.push(current); current = []; }
     } else {
       current.push(arg);
@@ -82,7 +82,7 @@ if (import.meta.main) {
     let stdout = '';
     let stderr = '';
     try {
-      const proc = Bun.spawn(args, { stdout: 'pipe', stderr: 'pipe' });
+      const proc = Bun.spawn(args, { stdout: 'pipe', stderr: 'pipe', stdin: 'ignore' });
       [stdout, stderr] = await Promise.all([
         new Response(proc.stdout).text(),
         new Response(proc.stderr).text()

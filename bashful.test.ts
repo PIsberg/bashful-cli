@@ -12,6 +12,10 @@ describe('splitSegments', () => {
     expect(splitSegments(['curl', '--help'])).toEqual([['curl', '--help']]);
   });
 
+  test('escaped pipe symbol evaluates correctly (Windows compat)', () => {
+    expect(splitSegments(['curl', '\\|', 'wget'])).toEqual([['curl'], ['wget']]);
+  });
+
   test('two commands separated by |', () => {
     expect(splitSegments(['curl', '|', 'wget'])).toEqual([['curl'], ['wget']]);
   });

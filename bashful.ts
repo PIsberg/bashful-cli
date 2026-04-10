@@ -15,7 +15,7 @@ export function splitSegments(args: string[]): string[][] {
   return segments;
 }
 
-const SCHEMA_REGEX = /^\s*(?:(-[a-zA-Z0-9]),?\s+)?(--[a-zA-Z0-9-]+)\s+(?:<([^>]+)>|\[([^\]]+)\]|([A-Z0-9_]{2,}))?\s+(.*)$/gm;
+const SCHEMA_REGEX = /^\s*(?:(-[a-zA-Z0-9]),?\s+)?(--[a-zA-Z0-9-]+|\/[a-zA-Z0-9]+)\s+(?:<([^>]+)>|\[([^\]]+)\]|([A-Z0-9_]{2,}))?\s+(.*)$/gm;
 
 /** Parse --help text into a flag schema using the "Bashful Regex". */
 export function parseSchema(helpText: string): Record<string, any> {

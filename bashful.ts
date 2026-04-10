@@ -280,7 +280,7 @@ if (import.meta.main) {
 </body>
 </html>`;
 
-  const PORT = 3000;
+  const PORT = parseInt(process.env.PORT || '3000', 10);
   const commandMap = new Map(commands.map(c => [c.name, c.schema]));
   const serializedSchemas = new Map(commands.map(c => [c.name, JSON.stringify(c.schema, null, 2)]));
 

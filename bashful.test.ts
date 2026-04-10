@@ -1,4 +1,4 @@
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { splitSegments, parseSchema, buildCLIArgs } from './bashful';
 
 // ── splitSegments ─────────────────────────────────────────────────────────────
@@ -10,6 +10,10 @@ describe('splitSegments', () => {
 
   test('single command with extra args (pipe mode)', () => {
     expect(splitSegments(['curl', '--help'])).toEqual([['curl', '--help']]);
+  });
+
+  test('escaped pipe symbol evaluates correctly (Windows compat)', () => {
+    expect(splitSegments(['curl', '\\|', 'wget'])).toEqual([['curl'], ['wget']]);
   });
 
   test('two commands separated by |', () => {
@@ -197,5 +201,69 @@ describe('buildCLIArgs', () => {
 
   test('unknown multi-char flag with false value is omitted', () => {
     expect(buildCLIArgs({ verbose: false }, {})).toEqual([]);
+  });
+});
+
+// ── Integration Tests ────────────────────────────────────────────────────────
+
+import { spawn } from 'bun';
+
+describe('Integration: HTTP Server Routing', () => {
+  let serverProcess: ReturnType<typeof spawn>;
+  const PORT = 3005; // Use a specific port for testing
+  const baseUrl = `http://localhost:${PORT}`;
+
+  beforeAll(async () => {
+    // Spawn the bashful server with a distinct port
+    serverProcess = spawn(['bun', 'run', './bashful.ts', 'bun'], {
+      env: { ...process.env, PORT: String(PORT) },
+      stdout: 'ignore',
+      stderr: 'ignore'
+    });
+    // Wait for the server to start handling requests
+    await new Promise(r => setTimeout(r, 600));
+  });
+
+  afterAll(() => {
+    if (serverProcess) serverProcess.kill();
+  });
+
+  test('GET / returns HTML UI', async () => {
+    const res = await fetch(`${baseUrl}/`);
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain('<!DOCTYPE html>');
+    expect(text).toContain('Bashful UI');
+  });
+
+  test('GET /bun/schema returns JSON schema', async () => {
+    const res = await fetch(`${baseUrl}/bun/schema`);
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(typeof json).toBe('object');
+  });
+
+  test('POST /bun executes command and returns output', async () => {
+    const res = await fetch(`${baseUrl}/bun`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version: true })
+    });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    // output should look like a version number e.g. 1.0.0
+    expect(text).toMatch(/\d+\.\d+\.\d+/);
+  });
+
+  test('GET /bun executes command via query params', async () => {
+    const res = await fetch(`${baseUrl}/bun?version=true`);
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toMatch(/\d+\.\d+\.\d+/);
+  });
+
+  test('GET /unknown returns 404', async () => {
+    const res = await fetch(`${baseUrl}/unknown`);
+    expect(res.status).toBe(404);
   });
 });

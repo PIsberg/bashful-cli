@@ -5,7 +5,7 @@ export function splitSegments(args: string[]): string[][] {
   const segments: string[][] = [];
   let current: string[] = [];
   for (const arg of args) {
-    if (arg === '|') {
+    if (arg === '|' || arg === '\\|') {
       if (current.length > 0) { segments.push(current); current = []; }
     } else {
       current.push(arg);
@@ -15,12 +15,12 @@ export function splitSegments(args: string[]): string[][] {
   return segments;
 }
 
+const SCHEMA_REGEX = /^\s*(?:(-[a-zA-Z0-9]),?\s+)?(--[a-zA-Z0-9-]+|\/[a-zA-Z0-9]+)\s+(?:<([^>]+)>|\[([^\]]+)\]|([A-Z0-9_]{2,}))?\s+(.*)$/gm;
+
 /** Parse --help text into a flag schema using the "Bashful Regex". */
 export function parseSchema(helpText: string): Record<string, any> {
-  const regex = /^\s*(?:(-[a-zA-Z0-9]),?\s+)?(--[a-zA-Z0-9-]+)\s+(?:<([^>]+)>|\[([^\]]+)\]|([A-Z0-9_]{2,}))?\s+(.*)$/gm;
   const schema: Record<string, any> = {};
-  let match;
-  while ((match = regex.exec(helpText)) !== null) {
+  for (const match of helpText.matchAll(SCHEMA_REGEX)) {
     const [, shortFlag, longFlag, type1, type2, type3, description] = match;
     const type = type1 || type2 || type3 || 'boolean';
     schema[longFlag.replace(/^--/, '')] = { shortFlag, longFlag, type, description: description.trim() };
@@ -61,6 +61,17 @@ export function buildCLIArgs(payload: Record<string, any>, schema: Record<string
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
+function safeSpawn(args: string[], options: any) {
+  try {
+    return Bun.spawn(args, options);
+  } catch (err: any) {
+    if (err.code === 'ENOENT' && process.platform === 'win32') {
+       return Bun.spawn(['cmd', '/c', ...args], options);
+    }
+    throw err;
+  }
+}
+
 if (import.meta.main) {
   const isDebug = process.argv.includes('--debug');
   if (isDebug) console.time('Bashful Startup');
@@ -75,22 +86,40 @@ if (import.meta.main) {
 
   const segments = splitSegments(args);
 
-  const commands: Array<{ name: string; schema: Record<string, any> }> = [];
-
-  for (const segment of segments) {
+  const commandPromises = segments.map(async (segment) => {
     const name = segment[0];
+    const executeAndRead = async (args: string[]) => {
+      let stdout = '', stderr = '';
+      try {
+        const proc = safeSpawn(args, { stdout: 'pipe', stderr: 'pipe', stdin: 'ignore' });
+        [stdout, stderr] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text()
+        ]);
+      } catch (err: any) {
+        stderr = err.message || String(err);
+      }
+      return stdout + stderr;
+    };
+
     let helpText = '';
     if (segment.length === 1) {
-      const proc = Bun.spawnSync([name, '--help'], { stdout: 'pipe', stderr: 'pipe' });
-      helpText = (proc.stdout?.toString() ?? '') + (proc.stderr?.toString() ?? '');
+      for (const flag of ['--help', '-h', '-?', '/?']) {
+        helpText = await executeAndRead([name, flag]);
+        if (Object.keys(parseSchema(helpText)).length > 0) {
+          break; // Found a valid schema, stop trying alternate help flags
+        }
+      }
     } else {
-      const proc = Bun.spawnSync(segment, { stdout: 'pipe', stderr: 'pipe' });
-      helpText = (proc.stdout?.toString() ?? '') + (proc.stderr?.toString() ?? '');
+      helpText = await executeAndRead(segment);
     }
+    
     const schema = parseSchema(helpText);
     if (isDebug) console.log(`[Bashful] Parsed schema for '${name}':`, Object.keys(schema).length, 'flags found.');
-    commands.push({ name, schema });
-  }
+    return { name, schema };
+  });
+
+  const commands = await Promise.all(commandPromises);
 
   const commandNames = commands.map(c => c.name);
 
@@ -281,8 +310,9 @@ if (import.meta.main) {
 </body>
 </html>`;
 
-  const PORT = 3000;
+  const PORT = parseInt(process.env.PORT || '3000', 10);
   const commandMap = new Map(commands.map(c => [c.name, c.schema]));
+  const serializedSchemas = new Map(commands.map(c => [c.name, JSON.stringify(c.schema, null, 2)]));
 
   const server = Bun.serve({
     port: PORT,
@@ -297,37 +327,37 @@ if (import.meta.main) {
         return new Response(null, { status: 204, headers: corsHeaders });
       }
 
-      const url = new URL(req.url);
+      const pathStart = req.url.indexOf('/', 8);
+      const fullPath = pathStart !== -1 ? req.url.slice(pathStart) : '/';
+      const searchStart = fullPath.indexOf('?');
+      const pathname = searchStart !== -1 ? fullPath.slice(0, searchStart) : fullPath;
 
-      if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/docs' || url.pathname === '/ui')) {
+      if (req.method === 'GET' && (pathname === '/' || pathname === '/docs' || pathname === '/ui')) {
         return new Response(swaggerHtml, {
           headers: { ...corsHeaders, 'Content-Type': 'text/html' }
         });
       }
 
-      const schemaMatch = url.pathname.match(/^\/([^/]+)\/schema$/);
-      if (req.method === 'GET' && schemaMatch) {
-        const cmdName = schemaMatch[1];
-        const schema = commandMap.get(cmdName);
-        if (schema) {
-          return new Response(JSON.stringify(schema, null, 2), {
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-          });
-        }
-      }
+      const parts = pathname.substring(1).split('/');
+      const cmdName = parts[0];
 
-      const execMatch = url.pathname.match(/^\/([^/]+)$/);
-      if ((req.method === 'POST' || req.method === 'GET') && execMatch) {
-        const cmdName = execMatch[1];
-        const schema = commandMap.get(cmdName);
-        if (schema !== undefined) {
+      if (commandMap.has(cmdName)) {
+        if (req.method === 'GET' && parts[1] === 'schema') {
+          const schemaString = serializedSchemas.get(cmdName);
+          if (schemaString) {
+            return new Response(schemaString, {
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+          }
+        } else if (parts.length === 1 && (req.method === 'POST' || req.method === 'GET')) {
+          const schema = commandMap.get(cmdName)!;
           try {
             let payload: Record<string, any> = {};
             if (req.method === 'POST') {
-              const text = await req.text();
-              if (text) payload = JSON.parse(text);
+              payload = await req.json().catch(() => ({}));
             } else {
-              for (const [key, value] of url.searchParams.entries()) {
+              const qs = searchStart !== -1 ? fullPath.slice(searchStart) : '';
+              for (const [key, value] of new URLSearchParams(qs).entries()) {
                 payload[key] = value;
               }
             }
@@ -335,7 +365,7 @@ if (import.meta.main) {
             const cliArgs = buildCLIArgs(payload, schema);
             if (isDebug) console.log(`[Bashful] Executing: ${cmdName} ${cliArgs.join(' ')}`);
 
-            const proc = Bun.spawn([cmdName, ...cliArgs], { stdout: 'pipe', stderr: 'pipe' });
+            const proc = safeSpawn([cmdName, ...cliArgs], { stdout: 'pipe', stderr: 'pipe' });
             return new Response(proc.stdout, {
               headers: { ...corsHeaders, 'Content-Type': 'text/plain' }
             });

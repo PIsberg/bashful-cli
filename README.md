@@ -6,6 +6,9 @@ The name is a double meaning: it wraps **bash**ful tools (tools that only speak 
 
 Think of it as a shy CLI tool finding its voice over HTTP.
 
+![bashful_infographics-v1](https://github.com/user-attachments/assets/f2e9d659-0e9d-4d84-ba27-b50ca399f397)
+
+
 ---
 
 ## What it does

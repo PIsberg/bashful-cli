@@ -282,6 +282,7 @@ if (import.meta.main) {
 
   const PORT = 3000;
   const commandMap = new Map(commands.map(c => [c.name, c.schema]));
+  const serializedSchemas = new Map(commands.map(c => [c.name, JSON.stringify(c.schema, null, 2)]));
 
   const server = Bun.serve({
     port: PORT,
@@ -307,9 +308,9 @@ if (import.meta.main) {
       const schemaMatch = url.pathname.match(/^\/([^/]+)\/schema$/);
       if (req.method === 'GET' && schemaMatch) {
         const cmdName = schemaMatch[1];
-        const schema = commandMap.get(cmdName);
-        if (schema) {
-          return new Response(JSON.stringify(schema, null, 2), {
+        const schemaString = serializedSchemas.get(cmdName);
+        if (schemaString) {
+          return new Response(schemaString, {
             headers: { ...corsHeaders, 'Content-Type': 'application/json' }
           });
         }

@@ -61,6 +61,17 @@ export function buildCLIArgs(payload: Record<string, any>, schema: Record<string
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
+function safeSpawn(args: string[], options: any) {
+  try {
+    return Bun.spawn(args, options);
+  } catch (err: any) {
+    if (err.code === 'ENOENT' && process.platform === 'win32') {
+       return Bun.spawn(['cmd', '/c', ...args], options);
+    }
+    throw err;
+  }
+}
+
 if (import.meta.main) {
   const isDebug = process.argv.includes('--debug');
   if (isDebug) console.time('Bashful Startup');
@@ -80,7 +91,7 @@ if (import.meta.main) {
     const executeAndRead = async (args: string[]) => {
       let stdout = '', stderr = '';
       try {
-        const proc = Bun.spawn(args, { stdout: 'pipe', stderr: 'pipe', stdin: 'ignore' });
+        const proc = safeSpawn(args, { stdout: 'pipe', stderr: 'pipe', stdin: 'ignore' });
         [stdout, stderr] = await Promise.all([
           new Response(proc.stdout).text(),
           new Response(proc.stderr).text()
@@ -354,7 +365,7 @@ if (import.meta.main) {
             const cliArgs = buildCLIArgs(payload, schema);
             if (isDebug) console.log(`[Bashful] Executing: ${cmdName} ${cliArgs.join(' ')}`);
 
-            const proc = Bun.spawn([cmdName, ...cliArgs], { stdout: 'pipe', stderr: 'pipe' });
+            const proc = safeSpawn([cmdName, ...cliArgs], { stdout: 'pipe', stderr: 'pipe' });
             return new Response(proc.stdout, {
               headers: { ...corsHeaders, 'Content-Type': 'text/plain' }
             });

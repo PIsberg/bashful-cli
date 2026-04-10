@@ -79,9 +79,17 @@ if (import.meta.main) {
     const name = segment[0];
     const args = segment.length === 1 ? [name, '--help'] : segment;
     
-    const proc = Bun.spawn(args, { stdout: 'pipe', stderr: 'pipe' });
-    const stdout = await new Response(proc.stdout).text();
-    const stderr = await new Response(proc.stderr).text();
+    let stdout = '';
+    let stderr = '';
+    try {
+      const proc = Bun.spawn(args, { stdout: 'pipe', stderr: 'pipe' });
+      [stdout, stderr] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text()
+      ]);
+    } catch (err: any) {
+      stderr = err.message || String(err);
+    }
     const helpText = stdout + stderr;
     
     const schema = parseSchema(helpText);

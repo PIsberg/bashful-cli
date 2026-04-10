@@ -77,20 +77,31 @@ if (import.meta.main) {
 
   const commandPromises = segments.map(async (segment) => {
     const name = segment[0];
-    const args = segment.length === 1 ? [name, '--help'] : segment;
-    
-    let stdout = '';
-    let stderr = '';
-    try {
-      const proc = Bun.spawn(args, { stdout: 'pipe', stderr: 'pipe', stdin: 'ignore' });
-      [stdout, stderr] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text()
-      ]);
-    } catch (err: any) {
-      stderr = err.message || String(err);
+    const executeAndRead = async (args: string[]) => {
+      let stdout = '', stderr = '';
+      try {
+        const proc = Bun.spawn(args, { stdout: 'pipe', stderr: 'pipe', stdin: 'ignore' });
+        [stdout, stderr] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text()
+        ]);
+      } catch (err: any) {
+        stderr = err.message || String(err);
+      }
+      return stdout + stderr;
+    };
+
+    let helpText = '';
+    if (segment.length === 1) {
+      for (const flag of ['--help', '-h', '-?', '/?']) {
+        helpText = await executeAndRead([name, flag]);
+        if (Object.keys(parseSchema(helpText)).length > 0) {
+          break; // Found a valid schema, stop trying alternate help flags
+        }
+      }
+    } else {
+      helpText = await executeAndRead(segment);
     }
-    const helpText = stdout + stderr;
     
     const schema = parseSchema(helpText);
     if (isDebug) console.log(`[Bashful] Parsed schema for '${name}':`, Object.keys(schema).length, 'flags found.');

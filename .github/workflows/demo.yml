@@ -73,5 +73,5 @@ jobs:
             exit 0
           fi
           git commit -m "chore: regenerate demo GIF"
-          git pull --rebase origin main
+          git pull --rebase --autostash origin main
           git push origin HEAD:main

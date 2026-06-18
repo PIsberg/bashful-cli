@@ -266,4 +266,17 @@ describe('Integration: HTTP Server Routing', () => {
     const res = await fetch(`${baseUrl}/unknown`);
     expect(res.status).toBe(404);
   });
+
+  test('exec endpoint surfaces stderr output (not just stdout)', async () => {
+    // `bun --unknown-flag-xyz` fails and writes its diagnostic to stderr.
+    // Previously only stdout was returned, so this came back empty.
+    const res = await fetch(`${baseUrl}/bun`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ _args: ['--this-flag-does-not-exist-xyz'] })
+    });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text.trim().length).toBeGreaterThan(0);
+  });
 });

@@ -311,11 +311,15 @@ if (import.meta.main) {
 </html>`;
 
   const PORT = parseInt(process.env.PORT || '3000', 10);
+  // Bind to localhost by default: this server executes arbitrary CLI commands,
+  // so it must not be exposed to the network unless deliberately opted in.
+  const HOST = process.env.HOST || '127.0.0.1';
   const commandMap = new Map(commands.map(c => [c.name, c.schema]));
   const serializedSchemas = new Map(commands.map(c => [c.name, JSON.stringify(c.schema, null, 2)]));
 
   const server = Bun.serve({
     port: PORT,
+    hostname: HOST,
     async fetch(req) {
       const corsHeaders = {
         'Access-Control-Allow-Origin': '*',
@@ -366,7 +370,27 @@ if (import.meta.main) {
             if (isDebug) console.log(`[Bashful] Executing: ${cmdName} ${cliArgs.join(' ')}`);
 
             const proc = safeSpawn([cmdName, ...cliArgs], { stdout: 'pipe', stderr: 'pipe' });
-            return new Response(proc.stdout, {
+
+            // Merge stdout + stderr into a single stream so error output (and
+            // tools that write to stderr) is visible, while preserving streaming.
+            const merged = new ReadableStream<Uint8Array>({
+              start(controller) {
+                const pump = async (stream: ReadableStream<Uint8Array> | undefined | null) => {
+                  if (!stream) return;
+                  const reader = stream.getReader();
+                  for (;;) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    controller.enqueue(value);
+                  }
+                };
+                Promise.all([pump(proc.stdout), pump(proc.stderr)])
+                  .then(() => controller.close())
+                  .catch((err) => controller.error(err));
+              }
+            });
+
+            return new Response(merged, {
               headers: { ...corsHeaders, 'Content-Type': 'text/plain' }
             });
           } catch (e: any) {
@@ -389,9 +413,9 @@ if (import.meta.main) {
   if (isDebug) {
     console.log(`[Bashful] Server listening on port ${server.port}`);
     for (const { name } of commands) {
-      console.log(`  - UI:     GET  http://localhost:${server.port}/`);
-      console.log(`  - Schema: GET  http://localhost:${server.port}/${name}/schema`);
-      console.log(`  - Exec:   POST http://localhost:${server.port}/${name}`);
+      console.log(`  - UI:     GET  http://${HOST}:${server.port}/`);
+      console.log(`  - Schema: GET  http://${HOST}:${server.port}/${name}/schema`);
+      console.log(`  - Exec:   POST http://${HOST}:${server.port}/${name}`);
     }
     console.timeEnd('Bashful Startup');
   }

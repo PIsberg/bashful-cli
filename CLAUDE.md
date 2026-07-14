@@ -16,7 +16,17 @@ bun run start                                       # Alias: wraps curl
 
 ```bash
 bun test                                            # Run all tests
+bun test -t "authorizeFlags"                        # Run one describe block / test by name
+bunx tsc --noEmit                                   # Typecheck (tsconfig is noEmit; there is no build step)
 ```
+
+CI (`.github/workflows/test.yml`) runs `bun install` + `bun test` on push/PR to `main`. Lint is not wired into `package.json` — ESLint, gitleaks, and whitespace fixers run via `.pre-commit-config.yaml`.
+
+**Env vars:** `PORT` (default `3000`), `HOST` (default `127.0.0.1`), `BASHFUL_CONFIG` (policy file path).
+
+## Docs
+
+`docs/usage.md` (invocation, endpoints, payloads, access control), `docs/architecture.md` (schema synthesis, enforcement layering, invariants), `docs/testing.md` (suite layout, integration-test mechanics). Keep them in sync when changing behaviour they describe.
 
 ## Architecture
 
@@ -45,3 +55,15 @@ The entire application lives in a single file: `bashful.ts`.
 **Access control:** an optional config file gates both commands and flags. `mode` is `blacklist` (allow unless denied) or `whitelist` (deny unless allowed). `commands.allow`/`deny` gate whole commands; `flags.<cmd>.allow`/`deny` gate individual flags; `flags.<cmd>.denyCombinations`/`allowCombinations` gate *sets* of flags used together. The `"*"` key under `flags` applies to every command; `"*"` inside a list means "everything". Rules name payload keys (`output`, `_args`), not CLI spellings (`--output`). Deny always beats allow. See `bashful.config.example.json` and the README for details.
 
 **`--debug` flag:** logs startup time, number of parsed flags, config load, blocked requests, and each execution command.
+
+## Conventions
+
+**Pure core, imperative shell.** Everything above the `// ── Entry point ──` divider in `bashful.ts` is exported pure functions (`splitSegments`, `parseSchema`, `buildCLIArgs`, `normalizeConfig`, `authorizeCommand`, `authorizeFlags`, `filterSchema`, …); everything below runs under `if (import.meta.main)`. Tests import the module directly, so new logic belongs above the divider — anything below it only runs as a process and can't be unit-tested.
+
+**Two invariants that are easy to undo accidentally:**
+- The server binds to `127.0.0.1` by default. It executes arbitrary CLI commands, so it must not listen on `0.0.0.0` unless the operator deliberately sets `HOST`.
+- The exec route merges stdout **and** stderr into one stream. Many CLIs write their real output or diagnostics to stderr; returning stdout alone silently yields empty responses.
+
+**Tests** (`bashful.test.ts`) are unit tests plus integration tests that spawn the real server via `bun run ./bashful.ts` on fixed ports (3005–3009). New integration suites need their own unused port, and policy fixtures are written to `tmpdir()` and passed with `--config`.
+
+**Windows:** `safeSpawn` retries a failed `ENOENT` spawn through `cmd /c`, which is how shell builtins and `.cmd` shims resolve. The `\|` command separator is escaped because an unescaped `|` would be consumed by the shell.

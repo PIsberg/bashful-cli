@@ -35,6 +35,14 @@ No config files. No code. Starts in milliseconds.
 
 ---
 
+## Documentation
+
+- **[Usage](docs/usage.md)** — invocation modes, endpoints, payload conventions, access control, environment variables.
+- **[Architecture](docs/architecture.md)** — how the help text becomes a schema, how a payload becomes a command line, and the invariants that keep it safe.
+- **[Testing](docs/testing.md)** — how the suite is organized and how to add to it.
+
+---
+
 ## Prerequisites
 
 - [Bun](https://bun.sh/) v1.0+
@@ -176,7 +184,7 @@ See [`bashful.config.example.json`](bashful.config.example.json) for a working s
 | `flags.<cmd>.denyCombinations` | List of flag sets. A request is rejected if it uses **all** flags of any listed set — the flags remain fine on their own. |
 | `flags.<cmd>.allowCombinations` | List of flag sets. A request is rejected unless every flag it uses fits inside **one** listed set. |
 
-Rules use **payload key names**, not CLI spellings: write `output`, not `--output`. Positional arguments are governed under the name `_args`, and `"*"` in any list means "everything".
+Rules use **payload key names**, not CLI spellings: write `output`, not `--output`. Positional arguments are governed under the name `_args`, and `"*"` in any list means "everything". Full reference: [docs/usage.md](docs/usage.md#access-control).
 
 **Deny always beats allow.** A flag set to `false` builds to nothing, so it is ignored by the rules.
 
@@ -204,10 +212,12 @@ bun run bashful.ts --debug curl \| wget
 ## Running tests
 
 ```bash
-bun test
+bun test                       # everything
+bun test -t "authorizeFlags"   # a single describe block or test
+bunx tsc --noEmit              # typecheck (no build step)
 ```
 
-Tests cover the pure functions at the core of Bashful — `splitSegments` (arg parsing), `parseSchema` (regex-based help text parsing), `buildCLIArgs` (payload → CLI translation), and the access-control layer (`parseConfig`, `authorizeCommand`, `authorizeFlags`, `filterSchema`) — plus integration tests that run the real server and check routing and policy enforcement end to end.
+Tests cover the pure functions at the core of Bashful — `splitSegments` (arg parsing), `parseSchema` (regex-based help text parsing), `buildCLIArgs` (payload → CLI translation), and the access-control layer (`parseConfig`, `authorizeCommand`, `authorizeFlags`, `filterSchema`) — plus integration tests that run the real server and check routing and policy enforcement end to end. See [docs/testing.md](docs/testing.md).
 
 ---
 
@@ -221,6 +231,8 @@ Everything lives in a single file: `bashful.ts`.
 - **Access control** — `parseConfig` validates the policy file; `authorizeCommand` / `authorizeFlags` decide what may run; `filterSchema` hides forbidden flags from the schema and UI.
 - **Server** — `Bun.serve` on port 3000. Routes: `GET /` (UI), `GET /<cmd>/schema`, `POST /<cmd>`.
 - **Execution** — `Bun.spawn` runs the real command and streams stdout directly as the HTTP response.
+
+Deeper dive — including the Bashful Regex, the enforcement layering, and the invariants worth not breaking: [docs/architecture.md](docs/architecture.md).
 
 ---
 

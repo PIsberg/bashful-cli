@@ -14,8 +14,10 @@ How to run Bashful, call its endpoints, and restrict what it will execute.
 ## Invocation
 
 ```bash
-bun run bashful.ts [--debug] [--config <file>] <command> [args...] [\| <command2> ...]
+bun run bashful.ts [--debug] [--config <file>] [--allow-get] [--allow-origin <origin>] <command> [args...] [\| <command2> ...]
 ```
+
+Bashful's own options are consumed wherever they appear; everything else is treated as the wrapped command.
 
 **Direct mode** — Bashful discovers the help text itself. It tries `--help`, then `-h`, `-?`, and `/?`, stopping at the first one that yields a parseable schema:
 
@@ -50,8 +52,8 @@ For each wrapped command `<cmd>`:
 |---|---|
 | `GET /` (also `/docs`, `/ui`) | The auto-generated browser UI — one tab per command. |
 | `GET /<cmd>/schema` | The parsed flag schema as JSON. Reflects the access-control policy: forbidden flags are not listed. |
-| `POST /<cmd>` | Execute the command. Flags come from the JSON body. |
-| `GET /<cmd>?flag=value` | Execute the command. Flags come from the query string. Convenient for a browser or `curl`; identical semantics to `POST`. |
+| `POST /<cmd>` | Execute the command. Flags come from the JSON body. Requires `Content-Type: application/json`. |
+| `GET /<cmd>?flag=value` | Execute the command with flags from the query string. **Disabled by default** — see [Browser safety](#browser-safety). Enable with `--allow-get`. |
 
 Responses stream the command's output as `text/plain`, with **stdout and stderr merged** — many CLIs write their real output or their diagnostics to stderr, so both are returned. The exit code is not currently surfaced; a failing command shows up as its error text in the body.
 
@@ -141,6 +143,25 @@ The two combination forms answer different questions. `denyCombinations` says *"
 > This gates the flags Bashful passes to a command; it does **not** sandbox the command. A wrapped tool that can read files or reach the network can still do so within the flags you permit. Bashful binds to `127.0.0.1` by default for the same reason — see below before changing that.
 
 Start from [`bashful.config.example.json`](../bashful.config.example.json).
+
+---
+
+## Browser safety
+
+Bashful runs on the same machine as your browser. Loopback binding keeps the *network* out, but it does not keep out **web pages you visit** — a page's JavaScript can reach `http://localhost:3000` because the request comes from your own machine. Three rules stop a hostile page from driving your wrapped commands:
+
+1. **No CORS headers by default.** A cross-origin page cannot read Bashful's responses, so it cannot exfiltrate command output. Use `--allow-origin <origin>` to permit exactly one origin (`--allow-origin '*'` is possible but re-opens this).
+2. **Exec requires `POST` with `Content-Type: application/json`.** A cross-origin "simple" request cannot set that header, so the browser must send a preflight first — and with no CORS headers the preflight fails and the real request is never sent. A POST without the JSON content type gets `415`.
+3. **The `Host` header must be loopback.** This defeats DNS rebinding, where an attacker's domain resolves to `127.0.0.1`; their hostname still arrives in the `Host` header. A mismatch gets `421`. The check is skipped when you bind a non-loopback `HOST`, since that is a deliberate opt-in to network access.
+
+`GET /<cmd>` executes a command, which makes it CSRF-able from any page (an `<img src>` is enough) and cannot be protected by a preflight. **It is therefore disabled by default** and returns `405`. `--allow-get` re-enables it for scripting convenience — reasonable on a trusted machine, but understand that it is the one door a hostile page can still knock on.
+
+```bash
+bun run bashful.ts --allow-get --allow-origin https://myapp.test curl
+```
+
+> [!NOTE]
+> None of this is authentication. Any *local* process can still call Bashful. Do not run it on a shared machine you don't trust, and do not expose it to a network without putting real auth in front of it.
 
 ---
 

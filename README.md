@@ -92,6 +92,9 @@ Open [http://localhost:3000](http://localhost:3000) in your browser to view the 
 > The POST above translates dynamically to the native CLI invocation:
 > `curl --silent --output example.html http://example.com`
 
+> [!IMPORTANT]
+> Bashful executes real commands, so it is hardened against the browser: no CORS by default, exec requires `POST` with `Content-Type: application/json`, the `Host` header must be loopback, and `GET` execution is off unless you pass `--allow-get`. See [Browser safety](docs/usage.md#browser-safety).
+
 ---
 
 ## Multiple commands

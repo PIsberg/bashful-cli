@@ -128,6 +128,8 @@ Two properties are load-bearing and easy to undo by accident. Both exist because
 
 **Bind to loopback.** `HOST` defaults to `127.0.0.1`. This process executes arbitrary CLI commands on request; on `0.0.0.0` that is remote command execution for anyone who can reach the port. Widening it must stay an explicit operator decision.
 
+**Keep the browser out.** Loopback binding stops the network but *not* the user's own browser: a page they visit can `fetch('http://localhost:3000/…')`, because that request originates from their machine. Three rules, all in the request path, close that off — no CORS headers unless an origin is explicitly configured (so a hostile page cannot read our output); exec requires `POST` with `Content-Type: application/json` (which no cross-origin *simple* request can set, forcing a preflight that then fails); and the `Host` header must be loopback (defeating DNS rebinding). `GET` exec cannot be protected by a preflight — an `<img src>` triggers it — so it is off unless `--allow-get` is passed. Relaxing any one of these individually re-opens the hole: they only work as a set.
+
 **Merge stderr into the response.** The exec route pumps stdout *and* stderr into one stream. Returning stdout alone means a failing command yields an empty `200` — the user sees nothing at all — and tools that legitimately write to stderr appear silent.
 
 A third, softer one: **`safeSpawn` retries through `cmd /c` on `ENOENT` on Windows**, which is how shell builtins and `.cmd` shims resolve there. Bypassing it breaks Windows for a large class of commands.

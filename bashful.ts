@@ -272,26 +272,108 @@ function safeSpawn(args: string[], options: any) {
   }
 }
 
-/** Pull `--config <path>` (and `--config=<path>`) out of the arg list. */
-export function extractConfigPath(args: string[]): { configPath?: string; rest: string[] } {
+// ── Request hardening ────────────────────────────────────────────────────────
+//
+// This server executes CLI commands, and it runs on the same machine as the
+// user's browser. Loopback binding keeps the *network* out, but it does nothing
+// about a web page the user happens to be visiting: that page shares the user's
+// machine, so `fetch('http://localhost:3000/...')` reaches us. Three rules keep
+// a hostile page from driving Bashful:
+//
+//   1. No CORS by default — a cross-origin page cannot read our responses.
+//   2. Exec requires POST + `Content-Type: application/json` — a "simple"
+//      cross-origin request cannot set that header, so the browser must
+//      preflight, and with no CORS headers the preflight fails and the request
+//      is never sent. GET exec re-opens this hole and is therefore opt-in.
+//   3. The Host header must be loopback — this is what defeats DNS rebinding,
+//      where an attacker-controlled name resolves to 127.0.0.1.
+
+export type ServerOptions = {
+  configPath?: string;
+  /** Allow `GET /<cmd>` to execute. Off by default: it is CSRF-able. */
+  allowGet: boolean;
+  /** Origin to send CORS headers for. Unset means no CORS headers at all. */
+  allowOrigin?: string;
+};
+
+/** Pull Bashful's own options out of the arg list, leaving the wrapped command. */
+export function extractOptions(args: string[]): ServerOptions & { rest: string[] } {
   const rest: string[] = [];
-  let configPath: string | undefined;
+  const options: ServerOptions & { rest: string[] } = { allowGet: false, rest };
+
+  const valueOf = (i: number, flag: string): [string, number] => {
+    const arg = args[i]!;
+    if (arg.startsWith(`${flag}=`)) {
+      const value = arg.slice(flag.length + 1);
+      if (!value) throw new Error(`${flag} requires a value`);
+      return [value, i];
+    }
+    const next = args[i + 1];
+    if (next === undefined || next.startsWith('-')) throw new Error(`${flag} requires a value`);
+    return [next, i + 1];
+  };
+
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
-    if (arg === '--config') {
-      const next = args[i + 1];
-      if (next === undefined || next.startsWith('-')) throw new Error("--config requires a file path");
-      configPath = next;
-      i++;
-    } else if (arg.startsWith('--config=')) {
-      const value = arg.slice('--config='.length);
-      if (!value) throw new Error("--config requires a file path");
-      configPath = value;
+    if (arg === '--config' || arg.startsWith('--config=')) {
+      [options.configPath, i] = valueOf(i, '--config');
+    } else if (arg === '--allow-origin' || arg.startsWith('--allow-origin=')) {
+      [options.allowOrigin, i] = valueOf(i, '--allow-origin');
+    } else if (arg === '--allow-get') {
+      options.allowGet = true;
     } else {
       rest.push(arg);
     }
   }
-  return { configPath, rest };
+  return options;
+}
+
+/** Hostname from a Host header, minus the port. Handles bracketed IPv6. */
+export function parseHostHeader(hostHeader: string | null): string | null {
+  if (!hostHeader) return null;
+  const value = hostHeader.trim();
+  if (!value) return null;
+  if (value.startsWith('[')) {
+    const end = value.indexOf(']');
+    return end === -1 ? null : value.slice(1, end).toLowerCase();
+  }
+  const colon = value.indexOf(':');
+  return (colon === -1 ? value : value.slice(0, colon)).toLowerCase();
+}
+
+export function isLoopbackHost(host: string): boolean {
+  return host === 'localhost' || host === '::1' || /^127\.\d+\.\d+\.\d+$/.test(host);
+}
+
+/**
+ * Reject a request whose Host header isn't loopback — that's a DNS-rebinding
+ * attempt. If the operator bound a non-loopback interface they deliberately
+ * opted into network access, so we stop second-guessing them.
+ */
+export function isAllowedHost(hostHeader: string | null, bindHost: string): boolean {
+  if (!isLoopbackHost(bindHost)) return true;
+  const host = parseHostHeader(hostHeader);
+  return host !== null && isLoopbackHost(host);
+}
+
+/** CORS headers for a request. No allowed origin configured → no headers, which is what we want. */
+export function buildCorsHeaders(origin: string | null, allowOrigin?: string): Record<string, string> {
+  if (!allowOrigin) return {};
+  const common = {
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+  };
+  if (allowOrigin === '*') return { 'Access-Control-Allow-Origin': '*', ...common };
+  if (origin && origin === allowOrigin) {
+    return { 'Access-Control-Allow-Origin': allowOrigin, Vary: 'Origin', ...common };
+  }
+  return {};
+}
+
+/** A JSON body is what forces a preflight on cross-origin POSTs. */
+export function isJsonContentType(contentType: string | null): boolean {
+  if (!contentType) return false;
+  return contentType.split(';')[0]!.trim().toLowerCase() === 'application/json';
 }
 
 const DEFAULT_CONFIG_FILE = 'bashful.config.json';
@@ -302,17 +384,20 @@ if (import.meta.main) {
 
   const rawArgs = process.argv.slice(2).filter(arg => arg !== '--debug');
 
-  let configPath: string | undefined;
+  let options: ServerOptions;
   let args: string[];
   try {
-    ({ configPath, rest: args } = extractConfigPath(rawArgs));
+    const { rest, ...opts } = extractOptions(rawArgs);
+    options = opts;
+    args = rest;
   } catch (err: any) {
     console.error(`[Bashful] ${err.message}`);
     process.exit(1);
   }
+  const { configPath, allowGet, allowOrigin } = options;
 
   if (args.length === 0) {
-    console.error('Usage: bashful [--debug] [--config <file>] <command> [args...] [\\| <command2> [args...] ...]');
+    console.error('Usage: bashful [--debug] [--config <file>] [--allow-get] [--allow-origin <origin>] <command> [args...] [\\| <command2> ...]');
     console.error('Example: bashful curl \\| wget');
     console.error('Example: bashful curl --help \\| wget --help');
     console.error('Example: bashful --config bashful.config.json curl');
@@ -584,11 +669,14 @@ if (import.meta.main) {
     port: PORT,
     hostname: HOST,
     async fetch(req) {
-      const corsHeaders = {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
-      };
+      const corsHeaders = buildCorsHeaders(req.headers.get('origin'), allowOrigin);
+
+      // Defeats DNS rebinding: an attacker's name resolving to 127.0.0.1 still
+      // carries their hostname in the Host header.
+      if (!isAllowedHost(req.headers.get('host'), HOST)) {
+        if (isDebug) console.log(`[Bashful] Rejected Host header: ${req.headers.get('host')}`);
+        return new Response('Invalid Host header.', { status: 421 });
+      }
 
       if (req.method === 'OPTIONS') {
         return new Response(null, { status: 204, headers: corsHeaders });
@@ -618,6 +706,31 @@ if (import.meta.main) {
           }
         } else if (parts.length === 1 && (req.method === 'POST' || req.method === 'GET')) {
           const schema = commandMap.get(cmdName)!;
+
+          // GET executes a command, so it is CSRF-able from any page the user
+          // visits (an <img> tag is enough). Opt-in only.
+          if (req.method === 'GET' && !allowGet) {
+            return new Response(
+              JSON.stringify({
+                error: 'Method Not Allowed',
+                reason: 'GET execution is disabled. Use POST, or start Bashful with --allow-get.',
+              }),
+              { status: 405, headers: { ...corsHeaders, 'Content-Type': 'application/json', Allow: 'POST' } }
+            );
+          }
+
+          // Requiring a JSON body is what forces the browser to preflight a
+          // cross-origin POST — which then fails, since we send no CORS headers.
+          if (req.method === 'POST' && !isJsonContentType(req.headers.get('content-type'))) {
+            return new Response(
+              JSON.stringify({
+                error: 'Unsupported Media Type',
+                reason: "Exec requests must send 'Content-Type: application/json'.",
+              }),
+              { status: 415, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+            );
+          }
+
           try {
             let payload: Record<string, any> = {};
             if (req.method === 'POST') {

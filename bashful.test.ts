@@ -5,7 +5,12 @@ import {
   buildCLIArgs,
   parseConfig,
   normalizeConfig,
-  extractConfigPath,
+  extractOptions,
+  parseHostHeader,
+  isLoopbackHost,
+  isAllowedHost,
+  buildCorsHeaders,
+  isJsonContentType,
   extractFlagNames,
   effectiveFlagPolicy,
   authorizeCommand,
@@ -263,29 +268,145 @@ describe('normalizeConfig / parseConfig', () => {
   });
 });
 
-// ── extractConfigPath ─────────────────────────────────────────────────────────
+// ── extractOptions ────────────────────────────────────────────────────────────
 
-describe('extractConfigPath', () => {
-  test('no --config leaves args untouched', () => {
-    expect(extractConfigPath(['curl', '|', 'wget'])).toEqual({ configPath: undefined, rest: ['curl', '|', 'wget'] });
+describe('extractOptions', () => {
+  test('no options leaves args untouched, and GET exec is off by default', () => {
+    const opts = extractOptions(['curl', '|', 'wget']);
+    expect(opts.rest).toEqual(['curl', '|', 'wget']);
+    expect(opts.allowGet).toBe(false);
+    expect(opts.allowOrigin).toBeUndefined();
+    expect(opts.configPath).toBeUndefined();
   });
 
   test('--config <path> is removed from args', () => {
-    expect(extractConfigPath(['--config', 'policy.json', 'curl']))
-      .toEqual({ configPath: 'policy.json', rest: ['curl'] });
+    const opts = extractOptions(['--config', 'policy.json', 'curl']);
+    expect(opts.configPath).toBe('policy.json');
+    expect(opts.rest).toEqual(['curl']);
   });
 
   test('--config=<path> is removed from args', () => {
-    expect(extractConfigPath(['--config=policy.json', 'curl']))
-      .toEqual({ configPath: 'policy.json', rest: ['curl'] });
+    expect(extractOptions(['--config=policy.json', 'curl']).configPath).toBe('policy.json');
   });
 
-  test('--config with no value throws', () => {
-    expect(() => extractConfigPath(['--config'])).toThrow(/requires a file path/);
+  test('--allow-get is a boolean switch', () => {
+    const opts = extractOptions(['--allow-get', 'curl']);
+    expect(opts.allowGet).toBe(true);
+    expect(opts.rest).toEqual(['curl']);
   });
 
-  test('--config followed by a flag throws', () => {
-    expect(() => extractConfigPath(['--config', '--debug', 'curl'])).toThrow(/requires a file path/);
+  test('--allow-origin takes a value in both spellings', () => {
+    expect(extractOptions(['--allow-origin', 'https://a.test', 'curl']).allowOrigin).toBe('https://a.test');
+    expect(extractOptions(['--allow-origin=https://a.test', 'curl']).allowOrigin).toBe('https://a.test');
+  });
+
+  test('all options combine, leaving only the command', () => {
+    const opts = extractOptions(['--config', 'p.json', '--allow-get', '--allow-origin=https://a.test', 'curl', '|', 'wget']);
+    expect(opts).toMatchObject({ configPath: 'p.json', allowGet: true, allowOrigin: 'https://a.test' });
+    expect(opts.rest).toEqual(['curl', '|', 'wget']);
+  });
+
+  test('an option with no value throws', () => {
+    expect(() => extractOptions(['--config'])).toThrow(/--config requires a value/);
+    expect(() => extractOptions(['--allow-origin'])).toThrow(/--allow-origin requires a value/);
+  });
+
+  test('an option followed by a flag throws', () => {
+    expect(() => extractOptions(['--config', '--allow-get', 'curl'])).toThrow(/requires a value/);
+  });
+});
+
+// ── Request hardening ─────────────────────────────────────────────────────────
+
+describe('parseHostHeader', () => {
+  test('strips the port', () => {
+    expect(parseHostHeader('localhost:3000')).toBe('localhost');
+    expect(parseHostHeader('127.0.0.1:3000')).toBe('127.0.0.1');
+  });
+
+  test('handles a bare hostname', () => {
+    expect(parseHostHeader('localhost')).toBe('localhost');
+  });
+
+  test('handles bracketed IPv6', () => {
+    expect(parseHostHeader('[::1]:3000')).toBe('::1');
+  });
+
+  test('lowercases', () => {
+    expect(parseHostHeader('LOCALHOST:3000')).toBe('localhost');
+  });
+
+  test('returns null for a missing or empty header', () => {
+    expect(parseHostHeader(null)).toBeNull();
+    expect(parseHostHeader('  ')).toBeNull();
+  });
+});
+
+describe('isLoopbackHost', () => {
+  test('accepts loopback names and addresses', () => {
+    for (const host of ['localhost', '127.0.0.1', '127.1.2.3', '::1']) {
+      expect(isLoopbackHost(host)).toBe(true);
+    }
+  });
+
+  test('rejects everything else', () => {
+    for (const host of ['evil.example', '0.0.0.0', '192.168.1.5', '127.0.0.1.evil.example']) {
+      expect(isLoopbackHost(host)).toBe(false);
+    }
+  });
+});
+
+describe('isAllowedHost', () => {
+  test('accepts a loopback Host when bound to loopback', () => {
+    expect(isAllowedHost('localhost:3000', '127.0.0.1')).toBe(true);
+  });
+
+  test('rejects a foreign Host when bound to loopback (DNS rebinding)', () => {
+    // The name resolves to 127.0.0.1, but the Host header gives the attacker away.
+    expect(isAllowedHost('evil.example:3000', '127.0.0.1')).toBe(false);
+  });
+
+  test('rejects a missing Host header when bound to loopback', () => {
+    expect(isAllowedHost(null, '127.0.0.1')).toBe(false);
+  });
+
+  test('accepts any Host when the operator bound a public interface', () => {
+    expect(isAllowedHost('bashful.internal:3000', '0.0.0.0')).toBe(true);
+  });
+});
+
+describe('buildCorsHeaders', () => {
+  test('sends no CORS headers by default — this is the point', () => {
+    expect(buildCorsHeaders('https://evil.example', undefined)).toEqual({});
+  });
+
+  test('echoes a matching configured origin', () => {
+    const headers = buildCorsHeaders('https://app.test', 'https://app.test');
+    expect(headers['Access-Control-Allow-Origin']).toBe('https://app.test');
+    expect(headers['Vary']).toBe('Origin');
+  });
+
+  test('sends nothing for an origin that does not match', () => {
+    expect(buildCorsHeaders('https://evil.example', 'https://app.test')).toEqual({});
+  });
+
+  test("'*' is honoured, but only when explicitly configured", () => {
+    expect(buildCorsHeaders('https://evil.example', '*')['Access-Control-Allow-Origin']).toBe('*');
+  });
+});
+
+describe('isJsonContentType', () => {
+  test('accepts application/json with or without parameters', () => {
+    expect(isJsonContentType('application/json')).toBe(true);
+    expect(isJsonContentType('application/json; charset=utf-8')).toBe(true);
+    expect(isJsonContentType('APPLICATION/JSON')).toBe(true);
+  });
+
+  test('rejects the content types a cross-origin form/simple request can set', () => {
+    expect(isJsonContentType('text/plain')).toBe(false);
+    expect(isJsonContentType('application/x-www-form-urlencoded')).toBe(false);
+    expect(isJsonContentType('multipart/form-data')).toBe(false);
+    expect(isJsonContentType(null)).toBe(false);
   });
 });
 
@@ -548,16 +669,52 @@ describe('Integration: HTTP Server Routing', () => {
     expect(text).toMatch(/\d+\.\d+\.\d+/);
   });
 
-  test('GET /bun executes command via query params', async () => {
-    const res = await fetch(`${baseUrl}/bun?version=true`);
-    expect(res.status).toBe(200);
-    const text = await res.text();
-    expect(text).toMatch(/\d+\.\d+\.\d+/);
-  });
-
   test('GET /unknown returns 404', async () => {
     const res = await fetch(`${baseUrl}/unknown`);
     expect(res.status).toBe(404);
+  });
+
+  test('GET execution is refused by default (it is CSRF-able)', async () => {
+    const res = await fetch(`${baseUrl}/bun?version=true`);
+    expect(res.status).toBe(405);
+    expect((await res.json() as { reason: string }).reason).toContain('--allow-get');
+  });
+
+  test('POST without a JSON content-type is refused', async () => {
+    // A cross-origin "simple" request cannot set application/json, so requiring
+    // it forces a preflight — which fails, because we send no CORS headers.
+    const res = await fetch(`${baseUrl}/bun`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ version: true })
+    });
+    expect(res.status).toBe(415);
+  });
+
+  test('no CORS headers are sent by default', async () => {
+    const res = await fetch(`${baseUrl}/bun`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: 'https://evil.example' },
+      body: JSON.stringify({ version: true })
+    });
+    expect(res.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
+  test('a preflight from an unapproved origin gets no CORS headers', async () => {
+    const res = await fetch(`${baseUrl}/bun`, {
+      method: 'OPTIONS',
+      headers: { Origin: 'https://evil.example', 'Access-Control-Request-Method': 'POST' }
+    });
+    expect(res.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
+  test('a foreign Host header is rejected (DNS rebinding)', async () => {
+    const res = await fetch(`${baseUrl}/bun`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Host: 'evil.example' },
+      body: JSON.stringify({ version: true })
+    });
+    expect(res.status).toBe(421);
   });
 
   test('with no config, nothing is blocked', async () => {
@@ -606,7 +763,8 @@ describe('Integration: config enforcement', () => {
       },
     }));
 
-    serverProcess = spawn(['bun', 'run', './bashful.ts', '--config', configPath, 'bun'], {
+    // --allow-get so the query-param path can be policy-tested too.
+    serverProcess = spawn(['bun', 'run', './bashful.ts', '--config', configPath, '--allow-get', 'bun'], {
       env: { ...process.env, PORT: String(PORT) },
       stdout: 'ignore',
       stderr: 'ignore'
@@ -673,6 +831,44 @@ describe('Integration: config enforcement', () => {
     const stderr = await new Response(proc.stderr).text();
     expect(await proc.exited).toBe(1);
     expect(stderr).toContain('Config file not found');
+  });
+});
+
+describe('Integration: opt-in relaxations', () => {
+  let serverProcess: ReturnType<typeof spawn>;
+  const PORT = 3010;
+  const baseUrl = `http://localhost:${PORT}`;
+  const ORIGIN = 'https://app.test';
+
+  beforeAll(async () => {
+    serverProcess = spawn(
+      ['bun', 'run', './bashful.ts', '--allow-get', '--allow-origin', ORIGIN, 'bun'],
+      { env: { ...process.env, PORT: String(PORT) }, stdout: 'ignore', stderr: 'ignore' }
+    );
+    await new Promise(r => setTimeout(r, 600));
+  });
+
+  afterAll(() => {
+    if (serverProcess) serverProcess.kill();
+  });
+
+  test('--allow-get re-enables query-param execution', async () => {
+    const res = await fetch(`${baseUrl}/bun?version=true`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toMatch(/\d+\.\d+\.\d+/);
+  });
+
+  test('--allow-origin echoes only the configured origin', async () => {
+    const allowed = await fetch(`${baseUrl}/bun?version=true`, { headers: { Origin: ORIGIN } });
+    expect(allowed.headers.get('access-control-allow-origin')).toBe(ORIGIN);
+
+    const denied = await fetch(`${baseUrl}/bun?version=true`, { headers: { Origin: 'https://evil.example' } });
+    expect(denied.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
+  test('the Host check still applies', async () => {
+    const res = await fetch(`${baseUrl}/bun?version=true`, { headers: { Host: 'evil.example' } });
+    expect(res.status).toBe(421);
   });
 });
 

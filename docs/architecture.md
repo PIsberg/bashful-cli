@@ -127,7 +127,21 @@ One `Bun.serve` handler, routed by hand off the path:
 - `GET /<cmd>/schema` — the pre-serialized, policy-filtered schema.
 - `POST /<cmd>` / `GET /<cmd>` — authorize, translate, spawn, stream.
 
-Output is streamed rather than buffered: a `ReadableStream` pumps the process's stdout and stderr into one response body, so a long-running command's output arrives as it is produced rather than at exit. CORS is permissive (`*`) since the server is loopback-bound by default.
+### Streaming vs. buffering
+
+Output is streamed by default: a `ReadableStream` pumps the process's stdout and stderr into one response body, so a long-running command's output arrives as it is produced rather than at exit.
+
+Streaming has one hard limitation — **the HTTP status is sent before the command finishes**, so it cannot carry the exit code. A failing command therefore streams back a `200`. Rather than sacrifice streaming for everyone, a client that sends `Accept: application/json` gets a *buffered* response carrying `exitCode`, `stdout`, `stderr`, and `timedOut` as fields. Browsers and terminals stream; scripts ask for JSON and can tell success from failure.
+
+### Process lifecycle
+
+Each in-flight request owns an OS process, which makes three things the server's responsibility:
+
+- **Disconnects.** `req.signal` is wired to `proc.kill()`. Without it, a cancelled request against a command that never exits on its own (`ping`, `tail -f`) leaks a process for the lifetime of the server.
+- **Timeouts.** `--timeout` arms a timer that kills the process; the flag is off by default, because wrapping a deliberately long-running command is a legitimate use.
+- **Concurrency.** `inFlight` is capped by `--max-concurrency` (16 by default); beyond it, requests get `429`. Nothing else bounds how many processes a caller can fork.
+
+All three release through the same path — `proc.exited` clears the timer, detaches the abort listener, and decrements `inFlight` — so the counter cannot drift regardless of *how* a command ended.
 
 ---
 

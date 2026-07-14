@@ -153,6 +153,47 @@ Start from [`bashful.config.example.json`](../bashful.config.example.json).
 
 ---
 
+## Exit codes and JSON responses
+
+By default a response **streams** the command's merged stdout+stderr as `text/plain`, which is what you want in a browser or a terminal. The cost is that the HTTP status is sent before the command finishes, so it cannot report the command's exit code — a failing command still returns `200` with its error text in the body.
+
+Send `Accept: application/json` to get a buffered response instead:
+
+```bash
+curl -X POST http://localhost:3000/curl \
+  -H "Content-Type: application/json" -H "Accept: application/json" \
+  -d '{"_args": ["http://example.com"], "silent": true}'
+```
+```json
+{
+  "command": "curl",
+  "args": ["--silent", "http://example.com"],
+  "exitCode": 0,
+  "stdout": "...",
+  "stderr": "",
+  "timedOut": false
+}
+```
+
+This is the mode to use from a script: `exitCode` tells you whether the command actually succeeded, and stdout and stderr arrive separately. The HTTP status stays `200` — the *request* succeeded even when the command didn't.
+
+---
+
+## Limits
+
+Every in-flight request holds a real OS process, so two limits apply:
+
+| Option | Default | Effect |
+|---|---|---|
+| `--max-concurrency <n>` | `16` | Requests beyond `n` running commands get `429` with `Retry-After`. `0` disables the cap. |
+| `--timeout <seconds>` | *(none)* | Kill a command that runs longer. `0` (the default) means no limit. |
+
+A client that hangs up **kills its command** rather than orphaning it, so an abandoned request can't leave a process running forever. That matters most for tools that never exit on their own (`ping`, `tail -f`): without it, every cancelled request would leak a process.
+
+If you wrap something long-running on purpose, leave `--timeout` off — the streaming response delivers output as it is produced.
+
+---
+
 ## Browser safety
 
 Bashful runs on the same machine as your browser. Loopback binding keeps the *network* out, but it does not keep out **web pages you visit** — a page's JavaScript can reach `http://localhost:3000` because the request comes from your own machine. Three rules stop a hostile page from driving your wrapped commands:

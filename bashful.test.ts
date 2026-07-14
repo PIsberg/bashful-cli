@@ -12,6 +12,8 @@ import {
   isAllowedHost,
   buildCorsHeaders,
   isJsonContentType,
+  wantsJson,
+  parseNumberOption,
   extractFlagNames,
   effectiveFlagPolicy,
   authorizeCommand,
@@ -419,6 +421,22 @@ describe('extractOptions', () => {
     expect(opts.rest).toEqual(['curl', '|', 'wget']);
   });
 
+  test('--timeout is taken in seconds and stored as ms', () => {
+    expect(extractOptions(['--timeout', '2.5', 'curl']).timeoutMs).toBe(2500);
+    expect(extractOptions(['curl']).timeoutMs).toBe(0); // no limit by default
+  });
+
+  test('--max-concurrency overrides the default cap', () => {
+    expect(extractOptions(['curl']).maxConcurrent).toBe(16);
+    expect(extractOptions(['--max-concurrency=1', 'curl']).maxConcurrent).toBe(1);
+    expect(extractOptions(['--max-concurrency', '0', 'curl']).maxConcurrent).toBe(0); // unlimited
+  });
+
+  test('a nonsense numeric option is rejected at startup', () => {
+    expect(() => extractOptions(['--timeout', 'soon', 'curl'])).toThrow(/non-negative number/);
+    expect(() => extractOptions(['--max-concurrency=-3', 'curl'])).toThrow(/non-negative number/);
+  });
+
   test('an option with no value throws', () => {
     expect(() => extractOptions(['--config'])).toThrow(/--config requires a value/);
     expect(() => extractOptions(['--allow-origin'])).toThrow(/--allow-origin requires a value/);
@@ -505,6 +523,33 @@ describe('buildCorsHeaders', () => {
 
   test("'*' is honoured, but only when explicitly configured", () => {
     expect(buildCorsHeaders('https://evil.example', '*')['Access-Control-Allow-Origin']).toBe('*');
+  });
+});
+
+describe('wantsJson', () => {
+  test('detects an application/json Accept header', () => {
+    expect(wantsJson('application/json')).toBe(true);
+    expect(wantsJson('application/json, text/plain;q=0.9')).toBe(true);
+    expect(wantsJson('text/html, application/json;q=0.8')).toBe(true);
+  });
+
+  test('anything else streams', () => {
+    expect(wantsJson('text/plain')).toBe(false);
+    expect(wantsJson('*/*')).toBe(false);
+    expect(wantsJson(null)).toBe(false);
+  });
+});
+
+describe('parseNumberOption', () => {
+  test('accepts non-negative numbers', () => {
+    expect(parseNumberOption('0', '--timeout')).toBe(0);
+    expect(parseNumberOption('2.5', '--timeout')).toBe(2.5);
+  });
+
+  test('rejects negatives and non-numbers', () => {
+    expect(() => parseNumberOption('-1', '--timeout')).toThrow(/non-negative/);
+    expect(() => parseNumberOption('soon', '--timeout')).toThrow(/non-negative/);
+    expect(() => parseNumberOption('', '--timeout')).toThrow(/non-negative/);
   });
 });
 
@@ -1011,6 +1056,121 @@ describe('Integration: opt-in relaxations', () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toContain('2');
   });
+});
+
+describe('Integration: process lifecycle', () => {
+  let serverProcess: ReturnType<typeof spawn>;
+  const PORT = 3011;
+  const baseUrl = `http://localhost:${PORT}`;
+
+  beforeAll(async () => {
+    serverProcess = spawn(
+      ['bun', 'run', './bashful.ts', '--allow-get', '--timeout', '1', '--max-concurrency', '2', 'bun'],
+      { env: { ...process.env, PORT: String(PORT) }, stdout: 'ignore', stderr: 'ignore' }
+    );
+    await new Promise(r => setTimeout(r, 600));
+  });
+
+  afterAll(() => {
+    if (serverProcess) serverProcess.kill();
+  });
+
+  const json = (body: unknown) => fetch(`${baseUrl}/bun`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(body)
+  });
+
+  test('an Accept: application/json request gets the exit code', async () => {
+    const res = await json({ version: true });
+    expect(res.status).toBe(200);
+    const body = await res.json() as { exitCode: number; stdout: string; stderr: string };
+    expect(body.exitCode).toBe(0);
+    expect(body.stdout).toMatch(/\d+\.\d+\.\d+/);
+  });
+
+  test('a failing command reports a non-zero exit code instead of a silent 200', async () => {
+    // Previously a failing command returned 200 with its error text in the body,
+    // so a programmatic client could not tell success from failure.
+    const body = await (await json({ _args: ['--eval', 'process.exit(3)'] })).json() as {
+      exitCode: number;
+    };
+    expect(body.exitCode).toBe(3);
+  });
+
+  test('stdout and stderr are separated in JSON mode', async () => {
+    const body = await (await json({ _args: ['--print', 'console.error("to-stderr"); "to-stdout"'] })).json() as {
+      stdout: string; stderr: string;
+    };
+    expect(body.stdout).toContain('to-stdout');
+    expect(body.stderr).toContain('to-stderr');
+  });
+
+  test('a command exceeding --timeout is killed', async () => {
+    const started = Date.now();
+    const body = await (await json({ _args: ['--eval', 'await Bun.sleep(30000)'] })).json() as {
+      timedOut: boolean; exitCode: number;
+    };
+    const elapsed = Date.now() - started;
+    expect(body.timedOut).toBe(true);
+    expect(elapsed).toBeLessThan(10_000); // killed at ~1s, not after 30s
+  }, 15_000);
+
+  test('requests beyond --max-concurrency are rejected with 429', async () => {
+    // Two slow commands saturate the cap of 2; the third must be turned away.
+    const slow = () => json({ _args: ['--eval', 'await Bun.sleep(3000)'] });
+    const a = slow(), b = slow();
+    await new Promise(r => setTimeout(r, 300)); // let both start
+    const third = await fetch(`${baseUrl}/bun?version=true`);
+    expect(third.status).toBe(429);
+    expect(third.headers.get('retry-after')).toBe('1');
+    await Promise.all([a, b]);
+  }, 15_000);
+
+  test('capacity is released once commands finish', async () => {
+    const res = await fetch(`${baseUrl}/bun?version=true`);
+    expect(res.status).toBe(200);
+  });
+});
+
+describe('Integration: client disconnect', () => {
+  let serverProcess: ReturnType<typeof spawn>;
+  const PORT = 3012;
+  const baseUrl = `http://localhost:${PORT}`;
+
+  beforeAll(async () => {
+    // A cap of 1 makes the kill observable: the slot only frees up if the
+    // process actually died. Otherwise the next request would get a 429.
+    serverProcess = spawn(
+      ['bun', 'run', './bashful.ts', '--allow-get', '--max-concurrency', '1', 'bun'],
+      { env: { ...process.env, PORT: String(PORT) }, stdout: 'ignore', stderr: 'ignore' }
+    );
+    await new Promise(r => setTimeout(r, 600));
+  });
+
+  afterAll(() => {
+    if (serverProcess) serverProcess.kill();
+  });
+
+  test('hanging up kills the command instead of orphaning it', async () => {
+    const controller = new AbortController();
+    const slow = fetch(`${baseUrl}/bun`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ _args: ['--eval', 'await Bun.sleep(30000)'] }),
+      signal: controller.signal,
+    }).catch(() => { /* aborted, as intended */ });
+
+    await new Promise(r => setTimeout(r, 400)); // let the command start
+    controller.abort();
+    await slow;
+    await new Promise(r => setTimeout(r, 400)); // let the kill land
+
+    // The 30s sleep is still notionally running. If it were orphaned, the single
+    // slot would still be occupied and this would be a 429.
+    const res = await fetch(`${baseUrl}/bun?version=true`);
+    expect(res.status).toBe(200);
+  }, 15_000);
 });
 
 describe('Integration: whitelist mode', () => {

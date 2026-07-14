@@ -348,12 +348,35 @@ export type ServerOptions = {
   allowGet: boolean;
   /** Origin to send CORS headers for. Unset means no CORS headers at all. */
   allowOrigin?: string;
+  /** Kill a command that runs longer than this. 0 = no limit. */
+  timeoutMs: number;
+  /** Reject exec requests beyond this many in flight. 0 = no limit. */
+  maxConcurrent: number;
 };
+
+/** Parse a non-negative number option, rejecting the nonsense early. */
+export function parseNumberOption(value: string, flag: string): number {
+  // Number('') is 0 and Number('  ') is 0, which would silently accept nonsense.
+  const n = value.trim() === '' ? NaN : Number(value);
+  if (!Number.isFinite(n) || n < 0) throw new Error(`${flag} must be a non-negative number (got '${value}')`);
+  return n;
+}
+
+/** A client asking for JSON wants the exit code, so we buffer instead of streaming. */
+export function wantsJson(accept: string | null): boolean {
+  if (!accept) return false;
+  return accept.split(',').some(part => part.split(';')[0]!.trim().toLowerCase() === 'application/json');
+}
 
 /** Pull Bashful's own options out of the arg list, leaving the wrapped command. */
 export function extractOptions(args: string[]): ServerOptions & { rest: string[] } {
   const rest: string[] = [];
-  const options: ServerOptions & { rest: string[] } = { allowGet: false, rest };
+  const options: ServerOptions & { rest: string[] } = {
+    allowGet: false,
+    timeoutMs: 0,
+    maxConcurrent: DEFAULT_MAX_CONCURRENT,
+    rest,
+  };
 
   const valueOf = (i: number, flag: string): [string, number] => {
     const arg = args[i]!;
@@ -373,6 +396,14 @@ export function extractOptions(args: string[]): ServerOptions & { rest: string[]
       [options.configPath, i] = valueOf(i, '--config');
     } else if (arg === '--allow-origin' || arg.startsWith('--allow-origin=')) {
       [options.allowOrigin, i] = valueOf(i, '--allow-origin');
+    } else if (arg === '--timeout' || arg.startsWith('--timeout=')) {
+      let seconds: string;
+      [seconds, i] = valueOf(i, '--timeout');
+      options.timeoutMs = parseNumberOption(seconds, '--timeout') * 1000;
+    } else if (arg === '--max-concurrency' || arg.startsWith('--max-concurrency=')) {
+      let value: string;
+      [value, i] = valueOf(i, '--max-concurrency');
+      options.maxConcurrent = parseNumberOption(value, '--max-concurrency');
     } else if (arg === '--allow-get') {
       options.allowGet = true;
     } else {
@@ -431,6 +462,8 @@ export function isJsonContentType(contentType: string | null): boolean {
 }
 
 const DEFAULT_CONFIG_FILE = 'bashful.config.json';
+/** Each in-flight request holds a real OS process, so this is bounded by default. */
+const DEFAULT_MAX_CONCURRENT = 16;
 
 if (import.meta.main) {
   const isDebug = process.argv.includes('--debug');
@@ -448,10 +481,11 @@ if (import.meta.main) {
     console.error(`[Bashful] ${err.message}`);
     process.exit(1);
   }
-  const { configPath, allowGet, allowOrigin } = options;
+  const { configPath, allowGet, allowOrigin, timeoutMs, maxConcurrent } = options;
 
   if (args.length === 0) {
-    console.error('Usage: bashful [--debug] [--config <file>] [--allow-get] [--allow-origin <origin>] <command> [args...] [\\| <command2> ...]');
+    console.error('Usage: bashful [--debug] [--config <file>] [--allow-get] [--allow-origin <origin>]');
+    console.error('               [--timeout <seconds>] [--max-concurrency <n>] <command> [args...] [\\| <command2> ...]');
     console.error('Example: bashful curl \\| wget');
     console.error('Example: bashful curl --help \\| wget --help');
     console.error('Example: bashful --config bashful.config.json curl');
@@ -723,6 +757,9 @@ if (import.meta.main) {
   const commandMap = new Map(visibleSchemas.map(c => [c.name, c.schema]));
   const serializedSchemas = new Map(visibleSchemas.map(c => [c.name, JSON.stringify(c.schema, null, 2)]));
 
+  /** Number of commands currently running. Bounded by --max-concurrency. */
+  let inFlight = 0;
+
   const server = Bun.serve({
     port: PORT,
     hostname: HOST,
@@ -813,10 +850,55 @@ if (import.meta.main) {
               });
             }
 
+            // Every in-flight request holds an OS process. Without a cap, N
+            // concurrent requests fork N processes with nothing bounding N.
+            if (maxConcurrent > 0 && inFlight >= maxConcurrent) {
+              if (isDebug) console.log(`[Bashful] At capacity (${inFlight}/${maxConcurrent}), rejecting`);
+              return new Response(
+                JSON.stringify({ error: 'Too Many Requests', reason: `at capacity (${maxConcurrent} concurrent executions)` }),
+                { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Retry-After': '1' } }
+              );
+            }
+
             const cliArgs = buildCLIArgs(payload, schema);
             if (isDebug) console.log(`[Bashful] Executing: ${cmdName} ${cliArgs.join(' ')}`);
 
             const proc = safeSpawn([cmdName, ...cliArgs], { stdout: 'pipe', stderr: 'pipe' });
+            inFlight++;
+
+            let timedOut = false;
+            const timer = timeoutMs > 0
+              ? setTimeout(() => { timedOut = true; proc.kill(); }, timeoutMs)
+              : undefined;
+
+            // A client that hangs up must not leave the command running forever.
+            const onAbort = () => proc.kill();
+            req.signal.addEventListener('abort', onAbort);
+
+            const release = () => {
+              clearTimeout(timer);
+              req.signal.removeEventListener('abort', onAbort);
+              inFlight--;
+            };
+            proc.exited.then(release, release);
+
+            // A JSON client wants the exit code, which a stream cannot carry —
+            // the status line is long gone by the time the process exits. So
+            // buffer for them, and keep streaming for everyone else.
+            if (wantsJson(req.headers.get('accept'))) {
+              const [stdout, stderr] = await Promise.all([
+                new Response(proc.stdout).text(),
+                new Response(proc.stderr).text(),
+              ]);
+              const exitCode = await proc.exited;
+              return new Response(
+                JSON.stringify({ command: cmdName, args: cliArgs, exitCode, stdout, stderr, timedOut }),
+                {
+                  status: 200,
+                  headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+                }
+              );
+            }
 
             // Merge stdout + stderr into a single stream so error output (and
             // tools that write to stderr) is visible, while preserving streaming.
@@ -832,7 +914,12 @@ if (import.meta.main) {
                   }
                 };
                 Promise.all([pump(proc.stdout), pump(proc.stderr)])
-                  .then(() => controller.close())
+                  .then(async () => {
+                    if (timedOut) {
+                      controller.enqueue(new TextEncoder().encode(`\n[Bashful] Killed after ${timeoutMs / 1000}s timeout.\n`));
+                    }
+                    controller.close();
+                  })
                   .catch((err) => controller.error(err));
               }
             });

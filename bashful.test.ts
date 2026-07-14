@@ -143,6 +143,69 @@ Usage: curl [options...] <url>
     const schema = parseSchema('  --verbose              Be verbose   ');
     expect(schema['verbose'].description).toBe('Be verbose');
   });
+
+  test('parses a short-only flag (no long form)', () => {
+    const schema = parseSchema('  -v                     Be verbose');
+    expect(schema['v']).toMatchObject({
+      shortFlag: '-v',
+      longFlag: '-v', // what actually gets emitted
+      type: 'boolean',
+      description: 'Be verbose',
+    });
+    expect(buildCLIArgs({ v: true }, schema)).toEqual(['-v']);
+  });
+
+  test('parses a short-only flag that takes a value', () => {
+    const schema = parseSchema('  -X <method>            Request method');
+    expect(schema['X']).toMatchObject({ longFlag: '-X', type: 'method' });
+    expect(buildCLIArgs({ X: 'POST' }, schema)).toEqual(['-X', 'POST']);
+  });
+
+  test('parses the --flag=<value> form', () => {
+    const schema = parseSchema('  --output=<file>        Write output here');
+    expect(schema['output']).toMatchObject({
+      longFlag: '--output',
+      type: 'file',
+      description: 'Write output here',
+    });
+    // The '=' is a help-text convention; we still emit the conventional form.
+    expect(buildCLIArgs({ output: 'f.txt' }, schema)).toEqual(['--output', 'f.txt']);
+  });
+
+  test('parses a flag with no description', () => {
+    const schema = parseSchema('  --silent');
+    expect(schema['silent']).toMatchObject({ longFlag: '--silent', type: 'boolean', description: '' });
+  });
+
+  test('parses a valueless flag at end of line with a short partner', () => {
+    const schema = parseSchema('  -s, --silent');
+    expect(schema['silent']).toMatchObject({ shortFlag: '-s', longFlag: '--silent' });
+  });
+
+  test('an all-caps word in the description is not mistaken for a value type', () => {
+    // Two+ spaces means the description started; a value is separated by one.
+    const schema = parseSchema('  --quiet                URL fetching stays silent');
+    expect(schema['quiet'].type).toBe('boolean');
+    expect(schema['quiet'].description).toBe('URL fetching stays silent');
+  });
+
+  test('the first definition of a flag wins over later mentions', () => {
+    const schema = parseSchema([
+      '  -o, --output <file>    Write to file',
+      'Examples:',
+      '  --output',
+    ].join('\n'));
+    expect(schema['output']).toMatchObject({ type: 'file', description: 'Write to file' });
+  });
+
+  test('a short flag and a long flag on separate lines stay separate entries', () => {
+    const schema = parseSchema([
+      '  -v                     Be verbose',
+      '  --version              Print version',
+    ].join('\n'));
+    expect(schema['v'].longFlag).toBe('-v');
+    expect(schema['version'].longFlag).toBe('--version');
+  });
 });
 
 // ── buildCLIArgs ──────────────────────────────────────────────────────────────

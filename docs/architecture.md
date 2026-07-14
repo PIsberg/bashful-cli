@@ -54,17 +54,24 @@ Everything above the divider is exported and free of I/O; `bashful.test.ts` impo
 
 ## The Bashful Regex
 
-The heart of the schema synthesis is one regex applied per line of help text:
+The heart of the schema synthesis is one regex applied per line of help text. It reads a line as:
 
 ```
-/^\s*(?:(-[a-zA-Z0-9]),?\s+)?(--[a-zA-Z0-9-]+|\/[a-zA-Z0-9]+)\s+(?:<([^>]+)>|\[([^\]]+)\]|([A-Z0-9_]{2,}))?\s+(.*)$/gm
+[short flag ,] <flag> [ = | SPACE  <value> ]  [2+ spaces]  [description]
 ```
 
-It reads a help line as: *optional short flag* → *long flag* → *optional value placeholder* → *description*. The value placeholder is recognized in the three conventions CLIs actually use — `<file>`, `[num]`, and `SECONDS` — and whichever matches becomes the flag's `type`. A flag with no placeholder is a `boolean`. The result is keyed by the long flag with its dashes stripped:
+`<flag>` is a long flag (`--output`), a Windows-style flag (`/?`), or a **short flag standing alone** (`-v`, with no long form — common in older tools). The value placeholder is recognized in the three conventions CLIs actually use — `<file>`, `[num]`, and `SECONDS` — and whichever matches becomes the flag's `type`; a flag with no placeholder is a `boolean`. The description is optional, because plenty of tools list a flag with none.
+
+Two separator rules do real work. A value may be attached with `=` (`--output=<file>`) *or* **exactly one space**; two or more spaces mean the description has started. That distinction is what stops `--quiet    URL fetching stays silent` from reading `URL` as a value type — without it, any description opening with an acronym would corrupt the flag's type.
+
+The result is keyed by the flag with its dashes stripped, and `longFlag` holds the string that will actually be emitted — for a short-only flag that is `-v`, not `--v`:
 
 ```ts
 "output": { shortFlag: "-o", longFlag: "--output", type: "file", description: "Write to file" }
+"v":      { shortFlag: "-v", longFlag: "-v",       type: "boolean", description: "Be verbose" }
 ```
+
+When a flag is mentioned more than once (definitions get echoed in examples), the first mention wins.
 
 This is a **heuristic, not a parser**. Help text is a human-facing format with no standard, so the regex trades completeness for working on the common shape. A tool that formats its help unusually will yield a partial schema — that isn't a fatal error, because unknown keys still translate (see below); it just means the UI won't offer those flags. This is also why direct mode tries several help flags and keeps the first that produces a non-empty schema.
 

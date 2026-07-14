@@ -15,15 +15,36 @@ export function splitSegments(args: string[]): string[][] {
   return segments;
 }
 
-const SCHEMA_REGEX = /^\s*(?:(-[a-zA-Z0-9]),?\s+)?(--[a-zA-Z0-9-]+|\/[a-zA-Z0-9]+)\s+(?:<([^>]+)>|\[([^\]]+)\]|([A-Z0-9_]{2,}))?\s+(.*)$/gm;
+// The "Bashful Regex" reads one help line as:
+//   [short flag ,] <flag> [=|SPACE <value>]  [two spaces] [description]
+// where <flag> is a long flag (--foo), a Windows-style flag (/foo), or a short
+// flag standing on its own (-v). A value is separated by '=' or exactly one
+// space — two or more spaces mean the description started, which stops an
+// acronym ("--quiet    URL to fetch") from being read as a value type.
+const SCHEMA_REGEX =
+  /^[ \t]*(?:(-[a-zA-Z0-9])(?:,|[ \t])[ \t]*(?=[-/]))?(--[a-zA-Z0-9][a-zA-Z0-9-]*|\/[a-zA-Z0-9?]+|-[a-zA-Z0-9])(?:[= ](?:<([^>]+)>|\[([^\]]+)\]|([A-Z][A-Z0-9_]+)))?(?:[ \t]{2,}(.*?))?[ \t]*$/gm;
 
 /** Parse --help text into a flag schema using the "Bashful Regex". */
 export function parseSchema(helpText: string): Record<string, any> {
   const schema: Record<string, any> = {};
   for (const match of helpText.matchAll(SCHEMA_REGEX)) {
-    const [, shortFlag, longFlag, type1, type2, type3, description] = match;
-    const type = type1 || type2 || type3 || 'boolean';
-    schema[longFlag.replace(/^--/, '')] = { shortFlag, longFlag, type, description: description.trim() };
+    const [, shortPartner, flag, type1, type2, type3, description] = match;
+    if (!flag) continue;
+
+    const isShortOnly = flag.startsWith('-') && !flag.startsWith('--');
+    // `flag` is what we emit; for a short-only flag that *is* the short flag.
+    const shortFlag = shortPartner ?? (isShortOnly ? flag : undefined);
+    const key = flag.startsWith('--') ? flag.slice(2) : isShortOnly ? flag.slice(1) : flag;
+
+    // Help texts often mention a flag again in examples; the definition comes first.
+    if (schema[key]) continue;
+
+    schema[key] = {
+      shortFlag,
+      longFlag: flag,
+      type: type1 || type2 || type3 || 'boolean',
+      description: (description ?? '').trim(),
+    };
   }
   return schema;
 }
@@ -565,6 +586,10 @@ if (import.meta.main) {
                 const div = document.createElement('div');
                 div.className = 'form-group';
                 const isBool = def.type === 'boolean';
+                // def.longFlag is the flag as it will actually be emitted — for a
+                // short-only flag that is '-v', not '--v'.
+                const flagText = (def.longFlag || '--' + key)
+                    + (def.shortFlag && def.shortFlag !== def.longFlag ? ' (' + def.shortFlag + ')' : '');
                 if (isBool) {
                     const label = document.createElement('label');
                     label.className = 'checkbox-label';
@@ -572,7 +597,7 @@ if (import.meta.main) {
                     input.type = 'checkbox';
                     input.name = key;
                     label.appendChild(input);
-                    label.appendChild(document.createTextNode('--' + key + (def.shortFlag ? ' (' + def.shortFlag + ')' : '')));
+                    label.appendChild(document.createTextNode(flagText));
                     const badge = document.createElement('span');
                     badge.className = 'badge';
                     badge.textContent = def.type;
@@ -580,7 +605,7 @@ if (import.meta.main) {
                     div.appendChild(label);
                 } else {
                     const label = document.createElement('label');
-                    label.textContent = '--' + key + (def.shortFlag ? ' (' + def.shortFlag + ')' : '');
+                    label.textContent = flagText;
                     const badge = document.createElement('span');
                     badge.className = 'badge';
                     badge.textContent = def.type;

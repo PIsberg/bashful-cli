@@ -1,4 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   splitSegments,
   parseSchema,
@@ -247,6 +249,69 @@ Usage: curl [options...] <url>
     ].join('\n'));
     expect(schema['v'].longFlag).toBe('-v');
     expect(schema['version'].longFlag).toBe('--version');
+  });
+});
+
+// ── parseSchema against real help text ────────────────────────────────────────
+//
+// The regex is the most fragile part of Bashful: it is a heuristic over a format
+// with no standard. These fixtures are the real, captured output of real tools,
+// so a regex change that quietly stops recognising a common shape fails here.
+
+const fixture = (name: string) =>
+  parseSchema(readFileSync(join(import.meta.dir, 'tests', 'fixtures', `${name}-help.txt`), 'utf8'));
+
+describe('parseSchema: real help text', () => {
+  test('curl: every flag in its help output is parsed', () => {
+    const schema = fixture('curl');
+    expect(Object.keys(schema)).toHaveLength(14);
+  });
+
+  test('curl: short flag, long flag, type and description are all recovered', () => {
+    const schema = fixture('curl');
+    expect(schema['output']).toEqual({
+      shortFlag: '-o',
+      longFlag: '--output',
+      type: 'file',
+      description: 'Write to file instead of stdout',
+    });
+    expect(schema['silent']).toMatchObject({ shortFlag: '-s', type: 'boolean', description: 'Silent mode' });
+    // The short flag letter often differs from the long name's initial.
+    expect(schema['head']).toMatchObject({ shortFlag: '-I', type: 'boolean' });
+    expect(schema['header']).toMatchObject({ shortFlag: '-H', type: 'header/@file' });
+  });
+
+  test('curl: trailing prose does not become a flag', () => {
+    // The help text ends with lines like: Use "--help all" to list all options
+    const schema = fixture('curl');
+    expect(schema['help']).toMatchObject({ type: 'subject' }); // the real -h, --help <subject>
+    for (const key of Object.keys(schema)) {
+      expect(key).toMatch(/^[a-zA-Z0-9][a-zA-Z0-9-]*$/);
+    }
+  });
+
+  test('bun and node: a large flag surface parses without malformed keys', () => {
+    for (const [name, atLeast] of [['bun', 50], ['node', 90]] as const) {
+      const schema = fixture(name);
+      expect(Object.keys(schema).length).toBeGreaterThanOrEqual(atLeast);
+      for (const [key, def] of Object.entries(schema)) {
+        expect(key).toMatch(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/);
+        expect(def.longFlag.startsWith('-')).toBe(true);
+      }
+    }
+  });
+
+  test('node: the --flag=<value> form is recognised', () => {
+    // node's help writes e.g. --env-file-if-exists=file
+    const schema = fixture('node');
+    const withValues = Object.values(schema).filter((d: any) => d.type !== 'boolean');
+    expect(withValues.length).toBeGreaterThan(0);
+  });
+
+  test('every parsed flag round-trips through buildCLIArgs', () => {
+    const schema = fixture('curl');
+    expect(buildCLIArgs({ silent: true, output: 'f.txt', header: ['A: 1', 'B: 2'] }, schema))
+      .toEqual(['--silent', '--output', 'f.txt', '--header', 'A: 1', '--header', 'B: 2']);
   });
 });
 
@@ -1063,7 +1128,6 @@ describe('Integration: HTTP Server Routing', () => {
 // ── Integration: policy enforcement ──────────────────────────────────────────
 
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 
 describe('Integration: config enforcement', () => {
   let serverProcess: ReturnType<typeof spawn>;

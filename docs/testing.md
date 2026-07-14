@@ -33,7 +33,8 @@ The suite mirrors the split in `bashful.ts`: pure functions get unit tests, the 
 | Block | Covers |
 |---|---|
 | `splitSegments` | Splitting args on `\|` into per-command segments; leading, trailing, and empty cases. |
-| `parseSchema` | The Bashful Regex against each help-text convention — bare booleans, `-s, --long` pairs, and the `<file>` / `[num]` / `ALLCAPS` value forms. |
+| `parseSchema` | The Bashful Regex against each help-text convention — bare booleans, `-s, --long` pairs, short-only flags, `--flag=<value>`, and the `<file>` / `[num]` / `ALLCAPS` value forms. |
+| `parseSchema: real help text` | The same regex against **captured output of real tools** in `tests/fixtures/` — see below. |
 | `buildCLIArgs` | Payload → CLI translation, including the fallbacks for keys absent from the schema and the rule that `false` emits nothing. |
 | `normalizeConfig` / `parseConfig` | Config validation — that a malformed policy *throws* rather than degrading to "allow everything". |
 | `extractConfigPath` | Pulling `--config` out of the arg list in both spellings. |
@@ -49,6 +50,22 @@ const config = normalizeConfig({ flags: { curl: { denyCombinations: [['output', 
 expect(authorizeFlags('curl', ['output'], config).allowed).toBe(true);
 expect(authorizeFlags('curl', ['output', 'proxy'], config).allowed).toBe(false);
 ```
+
+---
+
+## Fixtures
+
+`tests/fixtures/*-help.txt` hold the **real, captured `--help` output** of `curl`, `bun`, and `node`. The Bashful Regex is a heuristic over a format with no standard, which makes it the most fragile code in the repo — hand-written one-line examples prove it handles the shapes you *thought* of, while these prove it still handles the shapes real tools actually emit.
+
+The tests assert exact flag counts and exact parsed entries (`--output` → short flag `-o`, type `file`, and its description word for word), so a regex change that quietly stops recognising a common form fails loudly instead of silently shrinking the schema. They also assert that no *junk* keys appear — help text is full of prose, and a sloppy pattern will happily parse a sentence into a flag.
+
+Fixtures are committed rather than generated at test time, so the suite doesn't depend on which tools happen to be installed on the machine. To refresh or add one:
+
+```bash
+curl --help > tests/fixtures/curl-help.txt 2>&1
+```
+
+Then update the expected counts — a changed count is either a regression or a genuine improvement, and the diff makes you decide which.
 
 ---
 

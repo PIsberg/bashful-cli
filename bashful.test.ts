@@ -3,6 +3,7 @@ import {
   splitSegments,
   parseSchema,
   buildCLIArgs,
+  tokenizeArgs,
   PayloadError,
   parseConfig,
   normalizeConfig,
@@ -67,6 +68,43 @@ describe('splitSegments', () => {
 
   test('empty args returns empty array', () => {
     expect(splitSegments([])).toEqual([]);
+  });
+});
+
+// ── tokenizeArgs ──────────────────────────────────────────────────────────────
+
+describe('tokenizeArgs', () => {
+  test('splits on whitespace', () => {
+    expect(tokenizeArgs('http://example.com --silent')).toEqual(['http://example.com', '--silent']);
+  });
+
+  test('collapses runs of whitespace', () => {
+    expect(tokenizeArgs('  a   b \t c ')).toEqual(['a', 'b', 'c']);
+  });
+
+  test('keeps a double-quoted value with spaces together', () => {
+    expect(tokenizeArgs('--data "hello world"')).toEqual(['--data', 'hello world']);
+  });
+
+  test('keeps a single-quoted value with spaces together', () => {
+    expect(tokenizeArgs("--data 'hello world'")).toEqual(['--data', 'hello world']);
+  });
+
+  test('quotes can be embedded mid-token', () => {
+    expect(tokenizeArgs('--header="A: 1"')).toEqual(['--header=A: 1']);
+  });
+
+  test('the other quote survives inside a quoted run', () => {
+    expect(tokenizeArgs(`--msg "it's fine"`)).toEqual(['--msg', "it's fine"]);
+  });
+
+  test('an explicitly empty argument is preserved', () => {
+    expect(tokenizeArgs('--value ""')).toEqual(['--value', '']);
+  });
+
+  test('empty input yields no args', () => {
+    expect(tokenizeArgs('')).toEqual([]);
+    expect(tokenizeArgs('   ')).toEqual([]);
   });
 });
 
@@ -900,6 +938,12 @@ describe('Integration: HTTP Server Routing', () => {
     const text = await res.text();
     expect(text).toContain('<!DOCTYPE html>');
     expect(text).toContain('Bashful UI');
+  });
+
+  test('the UI ships the real tokenizer rather than a reimplementation', async () => {
+    const html = await (await fetch(`${baseUrl}/`)).text();
+    expect(html).toContain('function tokenizeArgs');
+    expect(html).toContain('payload._args = tokenizeArgs(argsVal)');
   });
 
   test('GET /bun/schema returns JSON schema', async () => {

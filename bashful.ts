@@ -49,6 +49,38 @@ export function parseSchema(helpText: string): Record<string, any> {
   return schema;
 }
 
+/**
+ * Split a command-line-ish string into arguments, honouring single and double
+ * quotes so a value containing spaces survives. Naive splitting on whitespace
+ * makes `--data "a b"` impossible to express.
+ *
+ * This runs in the browser too — it is injected into the UI page verbatim — so
+ * keep it dependency-free.
+ */
+export function tokenizeArgs(input: string): string[] {
+  const args: string[] = [];
+  let current = '';
+  let quote: '"' | "'" | null = null;
+  let hasContent = false;
+
+  for (let i = 0; i < input.length; i++) {
+    const char = input[i]!;
+    if (quote) {
+      if (char === quote) quote = null;
+      else current += char;
+    } else if (char === '"' || char === "'") {
+      quote = char;
+      hasContent = true; // '' is a real (empty) argument
+    } else if (/\s/.test(char)) {
+      if (current || hasContent) { args.push(current); current = ''; hasContent = false; }
+    } else {
+      current += char;
+    }
+  }
+  if (current || hasContent) args.push(current);
+  return args;
+}
+
 /** Thrown for a payload we refuse to translate. The server turns this into a 400. */
 export class PayloadError extends Error {}
 
@@ -669,6 +701,10 @@ if (import.meta.main) {
     <script>
         const commands = ${JSON.stringify(commandNames)};
 
+        // The same tokenizer the server tests, injected verbatim rather than
+        // reimplemented here — so quoting behaves identically in both places.
+        ${tokenizeArgs.toString()}
+
         function buildForm(cmd, schema) {
             const panel = document.createElement('div');
             panel.className = 'tab-panel';
@@ -686,7 +722,7 @@ if (import.meta.main) {
             const argsInput = document.createElement('input');
             argsInput.type = 'text';
             argsInput.name = '_args';
-            argsInput.placeholder = 'e.g. http://example.com';
+            argsInput.placeholder = 'e.g. http://example.com  (quote values with spaces)';
             argsGroup.appendChild(argsInput);
             form.appendChild(argsGroup);
 
@@ -765,7 +801,7 @@ if (import.meta.main) {
 
                 const payload = {};
                 const argsVal = form.querySelector('[name="_args"]').value;
-                if (argsVal) payload._args = argsVal.split(' ').filter(Boolean);
+                if (argsVal.trim()) payload._args = tokenizeArgs(argsVal);
 
                 form.querySelectorAll('input[type="checkbox"]').forEach(cb => {
                     if (cb.checked) payload[cb.name] = true;

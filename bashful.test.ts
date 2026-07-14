@@ -3,6 +3,7 @@ import {
   splitSegments,
   parseSchema,
   buildCLIArgs,
+  PayloadError,
   parseConfig,
   normalizeConfig,
   extractOptions,
@@ -222,6 +223,55 @@ describe('buildCLIArgs', () => {
   test('unknown multi-char flag with false value is omitted', () => {
     expect(buildCLIArgs({ verbose: false }, {})).toEqual([]);
   });
+
+  // Repeatable flags — curl -H, docker -e, and friends.
+  test('an array repeats the flag once per element', () => {
+    const schema = { header: { longFlag: '--header', type: 'string' } };
+    expect(buildCLIArgs({ header: ['A: 1', 'B: 2'] }, schema))
+      .toEqual(['--header', 'A: 1', '--header', 'B: 2']);
+  });
+
+  test('an array on an unknown key repeats too', () => {
+    expect(buildCLIArgs({ H: ['a', 'b'] }, {})).toEqual(['-H', 'a', '-H', 'b']);
+  });
+
+  test('a single-element array behaves like a bare value', () => {
+    expect(buildCLIArgs({ output: ['f.txt'] }, curlSchema)).toEqual(['--output', 'f.txt']);
+  });
+
+  test('an empty array emits nothing', () => {
+    expect(buildCLIArgs({ output: [] }, curlSchema)).toEqual([]);
+  });
+
+  test('numbers are rendered as values', () => {
+    expect(buildCLIArgs({ retry: 3 }, {})).toEqual(['--retry', '3']);
+  });
+
+  test('null and undefined emit nothing', () => {
+    expect(buildCLIArgs({ output: null, silent: undefined }, curlSchema)).toEqual([]);
+  });
+
+  test('an object value is rejected rather than passed as [object Object]', () => {
+    expect(() => buildCLIArgs({ output: { a: 1 } }, curlSchema)).toThrow(PayloadError);
+    expect(() => buildCLIArgs({ output: { a: 1 } }, curlSchema)).toThrow(/not a valid value/);
+  });
+
+  test('an object inside an array is rejected', () => {
+    expect(() => buildCLIArgs({ header: [{ a: 1 }] }, {})).toThrow(PayloadError);
+  });
+
+  test('a nested array is rejected', () => {
+    expect(() => buildCLIArgs({ header: [['a']] }, {})).toThrow(PayloadError);
+  });
+
+  test('a non-string _args is rejected', () => {
+    expect(() => buildCLIArgs({ _args: { url: 'x' } }, curlSchema)).toThrow(PayloadError);
+    expect(() => buildCLIArgs({ _args: [{ url: 'x' }] }, curlSchema)).toThrow(PayloadError);
+  });
+
+  test('numeric positional args are accepted', () => {
+    expect(buildCLIArgs({ _args: [8080] }, {})).toEqual(['8080']);
+  });
 });
 
 // ── Config parsing ────────────────────────────────────────────────────────────
@@ -429,6 +479,16 @@ describe('extractFlagNames', () => {
   test('ignores empty _args', () => {
     expect(extractFlagNames({ _args: [] })).toEqual([]);
     expect(extractFlagNames({ _args: '' })).toEqual([]);
+  });
+
+  // These must agree with buildCLIArgs — a value that emits nothing must not be
+  // judged by the policy, or a rule could fire for a flag that never runs.
+  test('omits values that build to nothing', () => {
+    expect(extractFlagNames({ a: null, b: undefined, c: [], d: false, e: 'x' })).toEqual(['e']);
+  });
+
+  test('an array counts once', () => {
+    expect(extractFlagNames({ header: ['A', 'B'] })).toEqual(['header']);
   });
 });
 
@@ -726,6 +786,16 @@ describe('Integration: HTTP Server Routing', () => {
     expect(res.status).toBe(200);
   });
 
+  test('an object-valued flag is rejected with 400, not run as [object Object]', async () => {
+    const res = await fetch(`${baseUrl}/bun`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ eval: { nested: true } })
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json() as { reason: string }).reason).toMatch(/not a valid value/);
+  });
+
   test('exec endpoint surfaces stderr output (not just stdout)', async () => {
     // `bun --unknown-flag-xyz` fails and writes its diagnostic to stderr.
     // Previously only stdout was returned, so this came back empty.
@@ -869,6 +939,14 @@ describe('Integration: opt-in relaxations', () => {
   test('the Host check still applies', async () => {
     const res = await fetch(`${baseUrl}/bun?version=true`, { headers: { Host: 'evil.example' } });
     expect(res.status).toBe(421);
+  });
+
+  test('a repeated query param repeats the flag instead of keeping only the last', async () => {
+    // `bun --eval a --eval b` — bun rejects the repeat, but its complaint proves
+    // both values reached the command rather than being collapsed into one.
+    const res = await fetch(`${baseUrl}/bun?_args=--print&_args=1%2B1`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('2');
   });
 });
 

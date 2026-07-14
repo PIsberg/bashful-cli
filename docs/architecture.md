@@ -79,7 +79,9 @@ This is a **heuristic, not a parser**. Help text is a human-facing format with n
 - `_args` comes first, so positionals precede flags — `curl --silent http://example.com` and `curl http://example.com --silent` both work for most tools, but the former is the conventional order.
 - A key in the schema uses its `longFlag`. Boolean-typed flags emit bare (`--silent`); everything else emits `--flag value`.
 - A key **not** in the schema still works: one character becomes `-x`, more becomes `--xyz`. This is what keeps a partial schema usable.
-- A value of `false` or `"false"` emits nothing at all.
+- An **array repeats the flag** once per element (`-H a -H b`), which is how repeatable flags are actually spelled. Joining them into one comma-separated value would be wrong for every tool that has them.
+- A value of `false`, `"false"`, `null`, `undefined`, or `[]` emits nothing at all.
+- An **object throws `PayloadError`**, which the server turns into a `400`. `String({})` is `'[object Object]'`, and passing that to a command as though it were a real value is worse than refusing.
 
 That last rule has a consequence the access-control layer has to respect: `{"silent": false}` is not a request to use `--silent`, so it must not trip a rule about `silent`. `extractFlagNames` therefore applies the same false-dropping logic before any policy check, keeping the two in agreement.
 

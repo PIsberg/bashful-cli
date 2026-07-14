@@ -28,31 +28,60 @@ export function parseSchema(helpText: string): Record<string, any> {
   return schema;
 }
 
+/** Thrown for a payload we refuse to translate. The server turns this into a 400. */
+export class PayloadError extends Error {}
+
+/**
+ * Render one payload value as a CLI string. Objects have no sane CLI spelling —
+ * String({}) is '[object Object]', which would be passed to the command as if it
+ * were a real value, so reject them instead.
+ */
+function scalarToArg(value: unknown, key: string): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    if (!Number.isFinite(value as number) && typeof value === 'number') {
+      throw new PayloadError(`'${key}': ${value} is not a valid value`);
+    }
+    return String(value);
+  }
+  throw new PayloadError(`'${key}': ${Array.isArray(value) ? 'nested arrays are' : `${value === null ? 'null' : typeof value} is`} not a valid value`);
+}
+
+const isOff = (value: unknown) => value === false || value === 'false';
+const isOn = (value: unknown) => value === true || value === 'true';
+
 /** Translate a JSON payload into a CLI argument array, using the schema for flag lookup. */
 export function buildCLIArgs(payload: Record<string, any>, schema: Record<string, any>): string[] {
   const cliArgs: string[] = [];
 
-  if (Array.isArray(payload._args)) {
-    cliArgs.push(...payload._args);
-  } else if (typeof payload._args === 'string') {
-    cliArgs.push(payload._args);
+  const positionals = payload._args;
+  if (Array.isArray(positionals)) {
+    cliArgs.push(...positionals.map(arg => scalarToArg(arg, '_args')));
+  } else if (typeof positionals === 'string') {
+    cliArgs.push(positionals);
+  } else if (positionals != null) {
+    throw new PayloadError("'_args' must be a string or an array of strings");
   }
 
   for (const [key, value] of Object.entries(payload)) {
     if (key === '_args') continue;
+    if (value == null || isOff(value)) continue; // builds to nothing
+
     const flagDef = schema[key];
-    if (flagDef) {
-      if (flagDef.type === 'boolean' || value === 'true' || value === true) {
-        if (value !== 'false' && value !== false) cliArgs.push(flagDef.longFlag);
+    const flag: string = flagDef ? flagDef.longFlag : key.length === 1 ? `-${key}` : `--${key}`;
+    const isBooleanFlag = flagDef ? flagDef.type === 'boolean' : false;
+
+    // An array repeats the flag once per element — `-H a -H b`, not `-H "a,b"`.
+    // This is how repeatable flags (curl -H, docker -e, …) are actually spelled.
+    const values = Array.isArray(value) ? value : [value];
+    if (Array.isArray(value) && value.length === 0) continue;
+
+    for (const item of values) {
+      if (isBooleanFlag || isOn(item)) {
+        if (!isOff(item)) cliArgs.push(flag);
       } else {
-        cliArgs.push(flagDef.longFlag, String(value));
+        cliArgs.push(flag, scalarToArg(item, key));
       }
-    } else if (key.length === 1) {
-      if (value === 'true' || value === true) cliArgs.push(`-${key}`);
-      else if (value !== 'false' && value !== false) cliArgs.push(`-${key}`, String(value));
-    } else {
-      if (value === 'true' || value === true) cliArgs.push(`--${key}`);
-      else if (value !== 'false' && value !== false) cliArgs.push(`--${key}`, String(value));
     }
   }
 
@@ -164,7 +193,11 @@ export function effectiveFlagPolicy(command: string, config: BashfulConfig): Fla
   };
 }
 
-/** The flag names a payload would actually emit — omits flags that build to nothing. */
+/**
+ * The flag names a payload would actually emit — omits flags that build to
+ * nothing. This must stay in lockstep with buildCLIArgs: a value it drops must
+ * be dropped here too, or the policy would judge a flag that never runs.
+ */
 export function extractFlagNames(payload: Record<string, any>): string[] {
   const names: string[] = [];
   for (const [key, value] of Object.entries(payload)) {
@@ -173,8 +206,8 @@ export function extractFlagNames(payload: Record<string, any>): string[] {
       if (nonEmpty) names.push('_args');
       continue;
     }
-    // buildCLIArgs drops false-valued flags, so they can't reach the shell.
-    if (value === false || value === 'false') continue;
+    if (value == null || value === false || value === 'false') continue;
+    if (Array.isArray(value) && value.length === 0) continue;
     names.push(key);
   }
   return names;
@@ -737,8 +770,12 @@ if (import.meta.main) {
               payload = await req.json().catch(() => ({}));
             } else {
               const qs = searchStart !== -1 ? fullPath.slice(searchStart) : '';
-              for (const [key, value] of new URLSearchParams(qs).entries()) {
-                payload[key] = value;
+              const params = new URLSearchParams(qs);
+              for (const key of new Set(params.keys())) {
+                // A repeated param becomes an array, so ?h=a&h=b repeats the flag
+                // rather than silently keeping only the last value.
+                const values = params.getAll(key);
+                payload[key] = values.length > 1 ? values : values[0];
               }
             }
 
@@ -779,10 +816,15 @@ if (import.meta.main) {
               headers: { ...corsHeaders, 'Content-Type': 'text/plain' }
             });
           } catch (e: any) {
-            return new Response(JSON.stringify({ error: e.message }), {
-              status: 400,
-              headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-            });
+            const isPayloadError = e instanceof PayloadError;
+            if (isDebug) console.log(`[Bashful] ${isPayloadError ? 'Rejected payload' : 'Error'}: ${e.message}`);
+            return new Response(
+              JSON.stringify({ error: isPayloadError ? 'Bad Request' : 'Internal Error', reason: e.message }),
+              {
+                status: isPayloadError ? 400 : 500,
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+              }
+            );
           }
         }
       }

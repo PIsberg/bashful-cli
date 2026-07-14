@@ -74,8 +74,15 @@ The JSON body (or query string) is translated back into CLI arguments. Keys are 
 | `{"output": "file.html"}` | `--output file.html` |
 | `{"v": true}` | `-v` — unknown single-char keys become short flags |
 | `{"x": "GET"}` | `-x GET` |
+| `{"header": ["A: 1", "B: 2"]}` | `--header "A: 1" --header "B: 2"` — an array **repeats** the flag |
+| `{"retry": 3}` | `--retry 3` — numbers are fine |
+| `{"output": null}` | *(omitted)* |
 
 A flag known to the schema as a boolean is emitted as a bare flag; anything else is emitted as `--flag value`. Keys that aren't in the schema still work — they fall back to `--long` or `-s` form based on key length.
+
+**Repeatable flags** (`curl -H`, `docker -e`, …) are expressed as an array, which repeats the flag once per element rather than joining the values. On the `GET` route, repeating a query param does the same thing: `?header=A&header=B`.
+
+Values must be strings, numbers, booleans, or arrays of those. An object has no sensible CLI spelling — rather than passing the command a literal `[object Object]`, Bashful rejects the request with `400`.
 
 ```bash
 curl -X POST http://localhost:3000/curl \

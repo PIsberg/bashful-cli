@@ -21,8 +21,16 @@ export function splitSegments(args: string[]): string[][] {
 // flag standing on its own (-v). A value is separated by '=' or exactly one
 // space — two or more spaces mean the description started, which stops an
 // acronym ("--quiet    URL to fetch") from being read as a value type.
+//
+// The description is anchored with \S and matched greedily. Writing it the
+// obvious way — `(?:[ \t]{2,}(.*?))?[ \t]*$` — lets the separator run, the
+// description and the trailing run all match the same whitespace, so a line
+// ending in n blanks can be split n ways and matching goes quadratic
+// (CodeQL js/polynomial-redos). Forcing the description to start on a
+// non-blank leaves exactly one split, and the trailing blanks it now absorbs
+// are removed by the .trim() below.
 const SCHEMA_REGEX =
-  /^[ \t]*(?:(-[a-zA-Z0-9])(?:,|[ \t])[ \t]*(?=[-/]))?(--[a-zA-Z0-9][a-zA-Z0-9-]*|\/[a-zA-Z0-9?]+|-[a-zA-Z0-9])(?:[= ](?:<([^>]+)>|\[([^\]]+)\]|([A-Z][A-Z0-9_]+)))?(?:[ \t]{2,}(.*?))?[ \t]*$/gm;
+  /^[ \t]*(?:(-[a-zA-Z0-9])(?:,|[ \t])[ \t]*(?=[-/]))?(--[a-zA-Z0-9][a-zA-Z0-9-]*|\/[a-zA-Z0-9?]+|-[a-zA-Z0-9])(?:[= ](?:<([^>]+)>|\[([^\]]+)\]|([A-Z][A-Z0-9_]+)))?(?:[ \t]{2,}(\S.*))?[ \t]*$/gm;
 
 /** Parse --help text into a flag schema using the "Bashful Regex". */
 export function parseSchema(helpText: string): Record<string, any> {

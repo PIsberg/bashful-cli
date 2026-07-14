@@ -1,0 +1,22 @@
+{
+  "mode": "blacklist",
+  "commands": {
+    "deny": ["rm", "shutdown", "sudo"]
+  },
+  "flags": {
+    "*": {
+      "deny": ["config"]
+    },
+    "curl": {
+      "deny": ["upload-file"],
+      "denyCombinations": [["output", "proxy"]],
+      "values": {
+        "_args": "^https://api\\.example\\.com/",
+        "output": "^/tmp/"
+      }
+    },
+    "wget": {
+      "allow": ["_args", "quiet", "output-document"]
+    }
+  }
+}

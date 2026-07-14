@@ -35,6 +35,14 @@ No config files. No code. Starts in milliseconds.
 
 ---
 
+## Documentation
+
+- **[Usage](docs/usage.md)** — invocation modes, endpoints, payload conventions, access control, environment variables.
+- **[Architecture](docs/architecture.md)** — how the help text becomes a schema, how a payload becomes a command line, and the invariants that keep it safe.
+- **[Testing](docs/testing.md)** — how the suite is organized and how to add to it.
+
+---
+
 ## Prerequisites
 
 - [Bun](https://bun.sh/) v1.0+
@@ -83,6 +91,9 @@ Open [http://localhost:3000](http://localhost:3000) in your browser to view the 
 > [!TIP]
 > The POST above translates dynamically to the native CLI invocation:
 > `curl --silent --output example.html http://example.com`
+
+> [!IMPORTANT]
+> Bashful executes real commands, so it is hardened against the browser: no CORS by default, exec requires `POST` with `Content-Type: application/json`, the `Host` header must be loopback, and `GET` execution is off unless you pass `--allow-get`. See [Browser safety](docs/usage.md#browser-safety).
 
 ---
 
@@ -134,6 +145,65 @@ bun run bashful.ts curl --help \| wget
 
 ---
 
+## Access control (whitelist / blacklist)
+
+Bashful executes real commands, so you can restrict what it will run with an optional JSON config — both **which commands** are wrappable and **which flags (and combinations of flags)** each command accepts.
+
+Bashful loads its config from, in order: `--config <file>`, `$BASHFUL_CONFIG`, or `./bashful.config.json` if it exists. With no config, nothing is restricted and behaviour is unchanged.
+
+```bash
+bun run bashful.ts --config bashful.config.json curl \| wget
+```
+
+See [`bashful.config.example.json`](bashful.config.example.json) for a working starting point.
+
+### Config format
+
+```json
+{
+  "mode": "blacklist",
+  "commands": {
+    "allow": ["curl", "wget"],
+    "deny": ["rm", "sudo"]
+  },
+  "flags": {
+    "*":    { "deny": ["config"] },
+    "curl": {
+      "allow": ["_args", "silent", "output"],
+      "deny": ["upload-file"],
+      "denyCombinations": [["output", "proxy"]],
+      "allowCombinations": [["_args", "silent"], ["_args", "output"]],
+      "values": { "_args": "^https://api\\.example\\.com/", "output": "^/tmp/" }
+    }
+  }
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `mode` | `"blacklist"` (default) — everything is allowed unless denied. `"whitelist"` — nothing is allowed unless explicitly allowed. |
+| `commands.allow` / `commands.deny` | Which commands may be wrapped at all. |
+| `flags.<cmd>` | Flag rules for one command. The `"*"` key applies to every command and is merged with the command's own rules. |
+| `flags.<cmd>.allow` / `.deny` | Individual flags. Naming an `allow` list whitelists that command's flags even in blacklist mode. |
+| `flags.<cmd>.denyCombinations` | List of flag sets. A request is rejected if it uses **all** flags of any listed set — the flags remain fine on their own. |
+| `flags.<cmd>.allowCombinations` | List of flag sets. A request is rejected unless every flag it uses fits inside **one** listed set. |
+| `flags.<cmd>.values` | Flag → regex its value must match, e.g. `{"output": "^/tmp/", "_args": "^https://api\\.example\\.com/"}`. Allowing a flag doesn't constrain it; this does. |
+
+Rules use **payload key names**, not CLI spellings: write `output`, not `--output`. Positional arguments are governed under the name `_args`, and `"*"` in any list means "everything". Full reference: [docs/usage.md](docs/usage.md#access-control).
+
+**Deny always beats allow.** A flag set to `false` builds to nothing, so it is ignored by the rules.
+
+### How it is enforced
+
+- **At startup** — wrapping a denied command is refused and Bashful exits with a non-zero status.
+- **At request time** — a blocked payload gets `403 Forbidden` with a JSON `reason`, and the command never runs. This covers both `POST` bodies and `GET` query params, including keys that never appeared in the parsed schema.
+- **In the schema and UI** — `GET /<cmd>/schema` only advertises the flags the policy permits, so the generated form can't offer a flag that would be rejected. Combination rules can't be expressed in a form, so those are enforced on the request.
+
+> [!WARNING]
+> This gates the flags Bashful passes to a command; it does not sandbox the command itself. A wrapped tool that can read files or reach the network can still do so within the flags you permit. Bashful binds to `127.0.0.1` by default for the same reason.
+
+---
+
 ## Debug mode
 
 Pass `--debug` anywhere before the command to log startup time, parsed flag counts, and each execution:
@@ -147,10 +217,12 @@ bun run bashful.ts --debug curl \| wget
 ## Running tests
 
 ```bash
-bun test
+bun test                       # everything
+bun test -t "authorizeFlags"   # a single describe block or test
+bunx tsc --noEmit              # typecheck (no build step)
 ```
 
-Tests cover the three pure functions at the core of Bashful: `splitSegments` (arg parsing), `parseSchema` (regex-based help text parsing), and `buildCLIArgs` (payload → CLI translation).
+Tests cover the pure functions at the core of Bashful — `splitSegments` (arg parsing), `parseSchema` (regex-based help text parsing), `buildCLIArgs` (payload → CLI translation), and the access-control layer (`parseConfig`, `authorizeCommand`, `authorizeFlags`, `filterSchema`) — plus integration tests that run the real server and check routing and policy enforcement end to end. See [docs/testing.md](docs/testing.md).
 
 ---
 
@@ -161,8 +233,11 @@ Everything lives in a single file: `bashful.ts`.
 - **`splitSegments(args)`** — splits CLI args on `|` into per-command segments.
 - **`parseSchema(helpText)`** — the "Bashful Regex" extracts short flags, long flags, value types (`<val>`, `[val]`, `ALL_CAPS`), and descriptions into a keyed schema object.
 - **`buildCLIArgs(payload, schema)`** — translates a JSON payload back into a flat CLI argument array.
+- **Access control** — `parseConfig` validates the policy file; `authorizeCommand` / `authorizeFlags` decide what may run; `filterSchema` hides forbidden flags from the schema and UI.
 - **Server** — `Bun.serve` on port 3000. Routes: `GET /` (UI), `GET /<cmd>/schema`, `POST /<cmd>`.
 - **Execution** — `Bun.spawn` runs the real command and streams stdout directly as the HTTP response.
+
+Deeper dive — including the Bashful Regex, the enforcement layering, and the invariants worth not breaking: [docs/architecture.md](docs/architecture.md).
 
 ---
 

@@ -10,6 +10,7 @@ bun run bashful.ts <command>                        # Wrap a command using --hel
 bun run bashful.ts curl \| wget                     # Multiple commands, one endpoint each
 bun run bashful.ts curl --help \| wget --help       # Explicit help commands (pipe mode)
 bun run bashful.ts --debug curl \| wget             # Run with debug logging
+bun run bashful.ts --config policy.json curl        # Run with an access-control policy
 bun run start                                       # Alias: wraps curl
 ```
 
@@ -25,10 +26,11 @@ The entire application lives in a single file: `bashful.ts`.
 
 1. **Ingestion** — Executes `<command> --help` (or `<explicit command>` in `pipe` mode) via `Bun.spawnSync` and captures stdout+stderr.
 2. **Schema synthesis** — Parses the help text with a heuristic regex (the "Bashful Regex") that extracts short flags (`-x`), long flags (`--foo`), argument types (`<val>`, `[val]`, or `ALL_CAPS`), and descriptions into a `schema` object keyed by flag name.
-3. **Server** — Spins up a `Bun.serve` HTTP server on port 3000 with three routes:
+3. **Policy** — Loads an optional JSON config (`--config <file>`, `$BASHFUL_CONFIG`, or `./bashful.config.json`) and refuses to wrap any denied command. Denied flags are stripped from the served schema so the UI can't offer them.
+4. **Server** — Spins up a `Bun.serve` HTTP server on port 3000 with three routes:
    - `GET /` (also `/docs`, `/ui`) — Returns a self-contained HTML page (the Swagger-like UI) with the schema baked in via template literal.
    - `GET /<command>/schema` — Returns the parsed schema as JSON.
-   - `POST /<command>` or `GET /<command>` — Translates the JSON body (or query params) back into CLI arguments and executes the command with `Bun.spawn`, streaming stdout as the response.
+   - `POST /<command>` or `GET /<command>` — Checks the payload against the policy (403 with a `reason` if blocked), then translates the JSON body (or query params) back into CLI arguments and executes the command with `Bun.spawn`, streaming stdout as the response.
 
 **Payload conventions (POST `/<command>`):**
 - `_args`: positional arguments (string or string array)
@@ -40,4 +42,6 @@ The entire application lives in a single file: `bashful.ts`.
 - `bashful.ts curl \| wget` — two endpoints: `/curl` and `/wget`
 - `bashful.ts curl --help \| wget --help` — pipe mode per segment: runs the full command as-is to get help text (useful when `--help` alone fails or outputs to stderr)
 
-**`--debug` flag:** logs startup time, number of parsed flags, and each execution command.
+**Access control:** an optional config file gates both commands and flags. `mode` is `blacklist` (allow unless denied) or `whitelist` (deny unless allowed). `commands.allow`/`deny` gate whole commands; `flags.<cmd>.allow`/`deny` gate individual flags; `flags.<cmd>.denyCombinations`/`allowCombinations` gate *sets* of flags used together. The `"*"` key under `flags` applies to every command; `"*"` inside a list means "everything". Rules name payload keys (`output`, `_args`), not CLI spellings (`--output`). Deny always beats allow. See `bashful.config.example.json` and the README for details.
+
+**`--debug` flag:** logs startup time, number of parsed flags, config load, blocked requests, and each execution command.

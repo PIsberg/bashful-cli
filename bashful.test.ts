@@ -1,5 +1,20 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
-import { splitSegments, parseSchema, buildCLIArgs } from './bashful';
+import {
+  splitSegments,
+  parseSchema,
+  buildCLIArgs,
+  parseConfig,
+  normalizeConfig,
+  extractConfigPath,
+  extractFlagNames,
+  effectiveFlagPolicy,
+  authorizeCommand,
+  authorizeFlags,
+  authorizeRequest,
+  filterSchema,
+  DEFAULT_CONFIG,
+  type BashfulConfig,
+} from './bashful';
 
 // ── splitSegments ─────────────────────────────────────────────────────────────
 
@@ -204,6 +219,284 @@ describe('buildCLIArgs', () => {
   });
 });
 
+// ── Config parsing ────────────────────────────────────────────────────────────
+
+describe('normalizeConfig / parseConfig', () => {
+  test('null config yields the permissive default', () => {
+    expect(normalizeConfig(null)).toEqual(DEFAULT_CONFIG);
+  });
+
+  test('defaults to blacklist mode', () => {
+    expect(normalizeConfig({}).mode).toBe('blacklist');
+  });
+
+  test('parses a full config', () => {
+    const config = parseConfig(JSON.stringify({
+      mode: 'whitelist',
+      commands: { allow: ['curl'], deny: ['rm'] },
+      flags: { curl: { allow: ['silent'], deny: ['config'], denyCombinations: [['output', 'upload-file']] } },
+    }));
+    expect(config.mode).toBe('whitelist');
+    expect(config.commands.allow).toEqual(['curl']);
+    expect(config.flags['curl']!.denyCombinations).toEqual([['output', 'upload-file']]);
+  });
+
+  test('rejects an unknown mode', () => {
+    expect(() => normalizeConfig({ mode: 'allowlist' })).toThrow(/mode/);
+  });
+
+  test('rejects a non-object root', () => {
+    expect(() => normalizeConfig(['curl'])).toThrow(/root/);
+  });
+
+  test('rejects a non-string entry in a command list', () => {
+    expect(() => normalizeConfig({ commands: { deny: ['rm', 7] } })).toThrow(/commands.deny/);
+  });
+
+  test('rejects combinations that are not arrays of arrays', () => {
+    expect(() => normalizeConfig({ flags: { curl: { denyCombinations: ['output'] } } }))
+      .toThrow(/denyCombinations/);
+  });
+
+  test('rejects invalid JSON', () => {
+    expect(() => parseConfig('{ not json')).toThrow(/invalid JSON/);
+  });
+});
+
+// ── extractConfigPath ─────────────────────────────────────────────────────────
+
+describe('extractConfigPath', () => {
+  test('no --config leaves args untouched', () => {
+    expect(extractConfigPath(['curl', '|', 'wget'])).toEqual({ configPath: undefined, rest: ['curl', '|', 'wget'] });
+  });
+
+  test('--config <path> is removed from args', () => {
+    expect(extractConfigPath(['--config', 'policy.json', 'curl']))
+      .toEqual({ configPath: 'policy.json', rest: ['curl'] });
+  });
+
+  test('--config=<path> is removed from args', () => {
+    expect(extractConfigPath(['--config=policy.json', 'curl']))
+      .toEqual({ configPath: 'policy.json', rest: ['curl'] });
+  });
+
+  test('--config with no value throws', () => {
+    expect(() => extractConfigPath(['--config'])).toThrow(/requires a file path/);
+  });
+
+  test('--config followed by a flag throws', () => {
+    expect(() => extractConfigPath(['--config', '--debug', 'curl'])).toThrow(/requires a file path/);
+  });
+});
+
+// ── extractFlagNames ──────────────────────────────────────────────────────────
+
+describe('extractFlagNames', () => {
+  test('lists flag keys', () => {
+    expect(extractFlagNames({ silent: true, output: 'out.html' })).toEqual(['silent', 'output']);
+  });
+
+  test('omits false-valued flags (they never reach the shell)', () => {
+    expect(extractFlagNames({ silent: false, verbose: 'false', output: 'o' })).toEqual(['output']);
+  });
+
+  test('counts non-empty _args as a governable flag name', () => {
+    expect(extractFlagNames({ _args: ['http://example.com'] })).toEqual(['_args']);
+    expect(extractFlagNames({ _args: 'http://example.com' })).toEqual(['_args']);
+  });
+
+  test('ignores empty _args', () => {
+    expect(extractFlagNames({ _args: [] })).toEqual([]);
+    expect(extractFlagNames({ _args: '' })).toEqual([]);
+  });
+});
+
+// ── effectiveFlagPolicy ───────────────────────────────────────────────────────
+
+describe('effectiveFlagPolicy', () => {
+  test('returns an empty policy when nothing is configured', () => {
+    expect(effectiveFlagPolicy('curl', DEFAULT_CONFIG)).toEqual({});
+  });
+
+  test('merges the wildcard policy with the command policy', () => {
+    const config = normalizeConfig({
+      flags: { '*': { deny: ['config'] }, curl: { deny: ['proxy'], allow: ['silent'] } },
+    });
+    const policy = effectiveFlagPolicy('curl', config);
+    expect(policy.deny).toEqual(['config', 'proxy']);
+    expect(policy.allow).toEqual(['silent']);
+  });
+
+  test('a command with no policy of its own still inherits the wildcard', () => {
+    const config = normalizeConfig({ flags: { '*': { deny: ['config'] } } });
+    expect(effectiveFlagPolicy('wget', config).deny).toEqual(['config']);
+  });
+});
+
+// ── authorizeCommand ──────────────────────────────────────────────────────────
+
+describe('authorizeCommand', () => {
+  test('allows anything with no config', () => {
+    expect(authorizeCommand('rm', DEFAULT_CONFIG)).toEqual({ allowed: true });
+  });
+
+  test('blacklist: denied command is rejected', () => {
+    const config = normalizeConfig({ commands: { deny: ['rm'] } });
+    const decision = authorizeCommand('rm', config);
+    expect(decision.allowed).toBe(false);
+    expect(decision.allowed === false && decision.reason).toMatch(/denied/);
+  });
+
+  test('blacklist: everything else is allowed', () => {
+    const config = normalizeConfig({ commands: { deny: ['rm'] } });
+    expect(authorizeCommand('curl', config).allowed).toBe(true);
+  });
+
+  test('whitelist: only listed commands are allowed', () => {
+    const config = normalizeConfig({ mode: 'whitelist', commands: { allow: ['curl'] } });
+    expect(authorizeCommand('curl', config).allowed).toBe(true);
+    expect(authorizeCommand('wget', config).allowed).toBe(false);
+  });
+
+  test('whitelist with no allow list denies everything', () => {
+    expect(authorizeCommand('curl', normalizeConfig({ mode: 'whitelist' })).allowed).toBe(false);
+  });
+
+  test('deny beats allow', () => {
+    const config = normalizeConfig({ mode: 'whitelist', commands: { allow: ['curl'], deny: ['curl'] } });
+    expect(authorizeCommand('curl', config).allowed).toBe(false);
+  });
+
+  test("'*' in the allow list permits any command", () => {
+    const config = normalizeConfig({ mode: 'whitelist', commands: { allow: ['*'] } });
+    expect(authorizeCommand('anything', config).allowed).toBe(true);
+  });
+});
+
+// ── authorizeFlags ────────────────────────────────────────────────────────────
+
+describe('authorizeFlags', () => {
+  test('allows any flag with no config', () => {
+    expect(authorizeFlags('curl', ['silent', 'output'], DEFAULT_CONFIG).allowed).toBe(true);
+  });
+
+  test('denies a blacklisted flag', () => {
+    const config = normalizeConfig({ flags: { curl: { deny: ['config'] } } });
+    const decision = authorizeFlags('curl', ['silent', 'config'], config);
+    expect(decision.allowed).toBe(false);
+    expect(decision.allowed === false && decision.reason).toContain("flag 'config'");
+  });
+
+  test('a wildcard flag policy applies to every command', () => {
+    const config = normalizeConfig({ flags: { '*': { deny: ['output'] } } });
+    expect(authorizeFlags('wget', ['output'], config).allowed).toBe(false);
+  });
+
+  test('an allow list on a command implies whitelisting for that command', () => {
+    const config = normalizeConfig({ flags: { curl: { allow: ['silent', '_args'] } } });
+    expect(authorizeFlags('curl', ['silent', '_args'], config).allowed).toBe(true);
+    expect(authorizeFlags('curl', ['silent', 'output'], config).allowed).toBe(false);
+  });
+
+  test('whitelist mode denies any flag when no allow list exists', () => {
+    const config = normalizeConfig({ mode: 'whitelist', commands: { allow: ['curl'] } });
+    expect(authorizeFlags('curl', ['silent'], config).allowed).toBe(false);
+    expect(authorizeFlags('curl', [], config).allowed).toBe(true); // no flags, nothing to check
+  });
+
+  test('denyCombinations rejects only the full combination', () => {
+    const config = normalizeConfig({
+      flags: { curl: { denyCombinations: [['output', 'upload-file']] } },
+    });
+    expect(authorizeFlags('curl', ['output'], config).allowed).toBe(true);
+    expect(authorizeFlags('curl', ['upload-file'], config).allowed).toBe(true);
+    const decision = authorizeFlags('curl', ['output', 'upload-file', 'silent'], config);
+    expect(decision.allowed).toBe(false);
+    expect(decision.allowed === false && decision.reason).toContain('combination');
+  });
+
+  test('allowCombinations requires the used flags to fit inside one combination', () => {
+    const config = normalizeConfig({
+      flags: { curl: { allowCombinations: [['silent', 'output'], ['verbose', '_args']] } },
+    });
+    expect(authorizeFlags('curl', ['silent'], config).allowed).toBe(true);
+    expect(authorizeFlags('curl', ['silent', 'output'], config).allowed).toBe(true);
+    expect(authorizeFlags('curl', ['verbose', '_args'], config).allowed).toBe(true);
+    // Valid individually, but they span two different allowed combinations.
+    expect(authorizeFlags('curl', ['silent', 'verbose'], config).allowed).toBe(false);
+  });
+
+  test('empty payload passes allowCombinations', () => {
+    const config = normalizeConfig({ flags: { curl: { allowCombinations: [['silent']] } } });
+    expect(authorizeFlags('curl', [], config).allowed).toBe(true);
+  });
+
+  test('deny beats allow for flags', () => {
+    const config = normalizeConfig({ flags: { curl: { allow: ['output'], deny: ['output'] } } });
+    expect(authorizeFlags('curl', ['output'], config).allowed).toBe(false);
+  });
+});
+
+// ── authorizeRequest ──────────────────────────────────────────────────────────
+
+describe('authorizeRequest', () => {
+  const config: BashfulConfig = normalizeConfig({
+    mode: 'whitelist',
+    commands: { allow: ['curl'] },
+    flags: { curl: { allow: ['silent', 'output', '_args'], denyCombinations: [['silent', 'output']] } },
+  });
+
+  test('allows a permitted command + payload', () => {
+    expect(authorizeRequest('curl', { silent: true, _args: ['http://example.com'] }, config).allowed).toBe(true);
+  });
+
+  test('rejects a command outside the whitelist', () => {
+    expect(authorizeRequest('wget', { silent: true }, config).allowed).toBe(false);
+  });
+
+  test('rejects a flag outside the whitelist', () => {
+    expect(authorizeRequest('curl', { proxy: 'http://evil' }, config).allowed).toBe(false);
+  });
+
+  test('rejects a denied combination', () => {
+    expect(authorizeRequest('curl', { silent: true, output: 'f' }, config).allowed).toBe(false);
+  });
+
+  test('a false-valued flag does not trip a combination rule', () => {
+    // `silent: false` builds to nothing, so this is really just `--output f`.
+    expect(authorizeRequest('curl', { silent: false, output: 'f' }, config).allowed).toBe(true);
+  });
+});
+
+// ── filterSchema ──────────────────────────────────────────────────────────────
+
+describe('filterSchema', () => {
+  const schema = {
+    silent: { longFlag: '--silent', type: 'boolean' },
+    output: { longFlag: '--output', type: 'file' },
+    config: { longFlag: '--config', type: 'file' },
+  };
+
+  test('returns the schema unchanged with no config', () => {
+    expect(filterSchema('curl', schema, DEFAULT_CONFIG)).toEqual(schema);
+  });
+
+  test('hides denied flags', () => {
+    const config = normalizeConfig({ flags: { curl: { deny: ['config'] } } });
+    expect(Object.keys(filterSchema('curl', schema, config))).toEqual(['silent', 'output']);
+  });
+
+  test('whitelist mode hides everything not allowed', () => {
+    const config = normalizeConfig({ mode: 'whitelist', flags: { curl: { allow: ['silent'] } } });
+    expect(Object.keys(filterSchema('curl', schema, config))).toEqual(['silent']);
+  });
+
+  test('combination rules do not hide individually-valid flags', () => {
+    const config = normalizeConfig({ flags: { curl: { denyCombinations: [['silent', 'output']] } } });
+    expect(Object.keys(filterSchema('curl', schema, config))).toEqual(['silent', 'output', 'config']);
+  });
+});
+
 // ── Integration Tests ────────────────────────────────────────────────────────
 
 import { spawn } from 'bun';
@@ -267,6 +560,15 @@ describe('Integration: HTTP Server Routing', () => {
     expect(res.status).toBe(404);
   });
 
+  test('with no config, nothing is blocked', async () => {
+    const res = await fetch(`${baseUrl}/bun`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ revision: true })
+    });
+    expect(res.status).toBe(200);
+  });
+
   test('exec endpoint surfaces stderr output (not just stdout)', async () => {
     // `bun --unknown-flag-xyz` fails and writes its diagnostic to stderr.
     // Previously only stdout was returned, so this came back empty.
@@ -278,5 +580,148 @@ describe('Integration: HTTP Server Routing', () => {
     expect(res.status).toBe(200);
     const text = await res.text();
     expect(text.trim().length).toBeGreaterThan(0);
+  });
+});
+
+// ── Integration: policy enforcement ──────────────────────────────────────────
+
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+describe('Integration: config enforcement', () => {
+  let serverProcess: ReturnType<typeof spawn>;
+  const PORT = 3006;
+  const baseUrl = `http://localhost:${PORT}`;
+  const configPath = join(tmpdir(), 'bashful-test-policy.json');
+
+  beforeAll(async () => {
+    await Bun.write(configPath, JSON.stringify({
+      mode: 'blacklist',
+      commands: { deny: ['rm'] },
+      flags: {
+        bun: {
+          deny: ['eval'],
+          denyCombinations: [['version', 'revision']],
+        },
+      },
+    }));
+
+    serverProcess = spawn(['bun', 'run', './bashful.ts', '--config', configPath, 'bun'], {
+      env: { ...process.env, PORT: String(PORT) },
+      stdout: 'ignore',
+      stderr: 'ignore'
+    });
+    await new Promise(r => setTimeout(r, 600));
+  });
+
+  afterAll(() => {
+    if (serverProcess) serverProcess.kill();
+  });
+
+  const post = (body: unknown) => fetch(`${baseUrl}/bun`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+
+  test('an allowed payload still executes', async () => {
+    const res = await post({ version: true });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toMatch(/\d+\.\d+\.\d+/);
+  });
+
+  test('a denied flag returns 403 with a reason', async () => {
+    const res = await post({ eval: '1+1' });
+    expect(res.status).toBe(403);
+    const json = await res.json() as { error: string; reason: string };
+    expect(json.error).toBe('Forbidden');
+    expect(json.reason).toContain("flag 'eval'");
+  });
+
+  test('a denied flag combination returns 403', async () => {
+    const res = await post({ version: true, revision: true });
+    expect(res.status).toBe(403);
+    expect((await res.json() as { reason: string }).reason).toContain('combination');
+  });
+
+  test('either flag of a denied combination is fine on its own', async () => {
+    expect((await post({ revision: true })).status).toBe(200);
+  });
+
+  test('a denied flag is also blocked via GET query params', async () => {
+    const res = await fetch(`${baseUrl}/bun?eval=1%2B1`);
+    expect(res.status).toBe(403);
+  });
+
+  test('refuses to start when wrapping a denied command', async () => {
+    const proc = spawn(['bun', 'run', './bashful.ts', '--config', configPath, 'rm'], {
+      env: { ...process.env, PORT: '3007' },
+      stdout: 'ignore',
+      stderr: 'pipe'
+    });
+    const stderr = await new Response(proc.stderr).text();
+    expect(await proc.exited).toBe(1);
+    expect(stderr).toContain('Refusing to wrap');
+  });
+
+  test('exits when the named config file does not exist', async () => {
+    const proc = spawn(['bun', 'run', './bashful.ts', '--config', 'no-such-file.json', 'bun'], {
+      env: { ...process.env, PORT: '3008' },
+      stdout: 'ignore',
+      stderr: 'pipe'
+    });
+    const stderr = await new Response(proc.stderr).text();
+    expect(await proc.exited).toBe(1);
+    expect(stderr).toContain('Config file not found');
+  });
+});
+
+describe('Integration: whitelist mode', () => {
+  let serverProcess: ReturnType<typeof spawn>;
+  const PORT = 3009;
+  const baseUrl = `http://localhost:${PORT}`;
+  const configPath = join(tmpdir(), 'bashful-test-whitelist.json');
+
+  beforeAll(async () => {
+    await Bun.write(configPath, JSON.stringify({
+      mode: 'whitelist',
+      commands: { allow: ['bun'] },
+      flags: { bun: { allow: ['version'] } },
+    }));
+
+    serverProcess = spawn(['bun', 'run', './bashful.ts', '--config', configPath, 'bun'], {
+      env: { ...process.env, PORT: String(PORT) },
+      stdout: 'ignore',
+      stderr: 'ignore'
+    });
+    await new Promise(r => setTimeout(r, 600));
+  });
+
+  afterAll(() => {
+    if (serverProcess) serverProcess.kill();
+  });
+
+  test('the whitelisted flag runs', async () => {
+    const res = await fetch(`${baseUrl}/bun`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version: true })
+    });
+    expect(res.status).toBe(200);
+  });
+
+  test('any other flag is rejected', async () => {
+    const res = await fetch(`${baseUrl}/bun`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ revision: true })
+    });
+    expect(res.status).toBe(403);
+  });
+
+  test('the schema only advertises whitelisted flags', async () => {
+    const res = await fetch(`${baseUrl}/bun/schema`);
+    const schema = await res.json() as Record<string, unknown>;
+    expect(Object.keys(schema).every(k => k === 'version')).toBe(true);
   });
 });

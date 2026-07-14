@@ -1,0 +1,18 @@
+{
+  "mode": "blacklist",
+  "commands": {
+    "deny": ["rm", "shutdown", "sudo"]
+  },
+  "flags": {
+    "*": {
+      "deny": ["config"]
+    },
+    "curl": {
+      "deny": ["upload-file"],
+      "denyCombinations": [["output", "proxy"]]
+    },
+    "wget": {
+      "allow": ["_args", "quiet", "output-document"]
+    }
+  }
+}

@@ -77,10 +77,21 @@ The JSON body (or query string) is translated back into CLI arguments. Keys are 
 | `{"header": ["A: 1", "B: 2"]}` | `--header "A: 1" --header "B: 2"` — an array **repeats** the flag |
 | `{"retry": 3}` | `--retry 3` — numbers are fine |
 | `{"output": null}` | *(omitted)* |
+| `{"_stdin": "text"}` | piped to the command's stdin; not a flag |
 
 A flag known to the schema as a boolean is emitted as a bare flag; anything else is emitted as `--flag value`. Keys that aren't in the schema still work — they fall back to `--long` or `-s` form based on key length.
 
 **Repeatable flags** (`curl -H`, `docker -e`, …) are expressed as an array, which repeats the flag once per element rather than joining the values. On the `GET` route, repeating a query param does the same thing: `?header=A&header=B`.
+
+**Standard input** is `_stdin`, a string piped to the command verbatim (never tokenized or quoted). This is how you reach the large class of tools that read stdin:
+
+```bash
+curl -X POST http://localhost:3000/jq \
+  -H "Content-Type: application/json" \
+  -d '{"_args": [".name"], "_stdin": "{\"name\": \"bashful\"}"}'
+```
+
+When `_stdin` is absent, the command's stdin is **closed**, not inherited — otherwise a tool that reads stdin would hang forever waiting on input that will never arrive. Like `_args`, `_stdin` is governed by the access-control policy under that name.
 
 Values must be strings, numbers, booleans, or arrays of those. An object has no sensible CLI spelling — rather than passing the command a literal `[object Object]`, Bashful rejects the request with `400`.
 
@@ -154,7 +165,7 @@ Allowing a flag is not the same as constraining it. `"allow": ["output"]` lets t
 
 Now `curl` may only fetch that one host and only write under `/tmp`. Patterns are unanchored JavaScript regexes tested against each value, so anchor them yourself (`^…$`) — an unanchored `/tmp/` would happily match `/etc/../tmp/../etc/passwd`. A pattern for a flag used as a bare boolean has no value to check and is inert. Broken regexes are rejected when the config loads, not on the first request.
 
-Rules name **payload keys**, not CLI spellings: write `output`, not `--output`. Positional arguments are governed under the name `_args`. `"*"` inside any list means "everything". **Deny always beats allow.** A flag set to `false` builds to nothing, so the rules ignore it.
+Rules name **payload keys**, not CLI spellings: write `output`, not `--output`. Positional arguments are governed under the name `_args` and standard input under `_stdin`. `"*"` inside any list means "everything". **Deny always beats allow.** A flag set to `false` builds to nothing, so the rules ignore it.
 
 The two combination forms answer different questions. `denyCombinations` says *"these must never appear together"* — useful for pairs that are individually harmless but dangerous combined. `allowCombinations` says *"only these shapes of request are valid"* — a request's flags must all be contained in a single listed set, so two flags that are each legal but belong to different sets are rejected together.
 

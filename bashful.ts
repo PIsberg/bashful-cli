@@ -116,8 +116,12 @@ export function buildCLIArgs(payload: Record<string, any>, schema: Record<string
     throw new PayloadError("'_args' must be a string or an array of strings");
   }
 
+  if (payload._stdin != null && typeof payload._stdin !== 'string') {
+    throw new PayloadError("'_stdin' must be a string");
+  }
+
   for (const [key, value] of Object.entries(payload)) {
-    if (key === '_args') continue;
+    if (key === '_args' || key === '_stdin') continue; // not flags
     if (value == null || isOff(value)) continue; // builds to nothing
 
     const flagDef = schema[key];
@@ -328,6 +332,12 @@ export function extractFlagNames(payload: Record<string, any>): string[] {
     if (key === '_args') {
       const nonEmpty = Array.isArray(value) ? value.length > 0 : typeof value === 'string' && value.length > 0;
       if (nonEmpty) names.push('_args');
+      continue;
+    }
+    // '_stdin' is not a flag, but it *is* input to the command, so the policy
+    // must be able to allow, deny, and pattern-match it like everything else.
+    if (key === '_stdin') {
+      if (typeof value === 'string' && value.length > 0) names.push('_stdin');
       continue;
     }
     if (value == null || value === false || value === 'false') continue;
@@ -684,7 +694,7 @@ if (import.meta.main) {
         .form-group:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
         label { display: block; font-weight: 600; margin-bottom: 0.25rem; }
         .desc { font-size: 0.875rem; color: #6b7280; margin-bottom: 0.5rem; }
-        input[type="text"] { width: 100%; padding: 0.5rem; border: 1px solid #d1d5db; border-radius: 0.25rem; box-sizing: border-box; font-family: monospace; }
+        input[type="text"], textarea { width: 100%; padding: 0.5rem; border: 1px solid #d1d5db; border-radius: 0.25rem; box-sizing: border-box; font-family: monospace; resize: vertical; }
         input[type="checkbox"] { margin-right: 0.5rem; transform: scale(1.2); }
         .checkbox-label { display: flex; align-items: center; font-weight: 600; cursor: pointer; }
         button.exec-btn { background: #2563eb; color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 0.25rem; cursor: pointer; font-weight: bold; font-size: 1rem; width: 100%; transition: background 0.2s; }
@@ -725,6 +735,16 @@ if (import.meta.main) {
             argsInput.placeholder = 'e.g. http://example.com  (quote values with spaces)';
             argsGroup.appendChild(argsInput);
             form.appendChild(argsGroup);
+
+            const stdinGroup = document.createElement('div');
+            stdinGroup.className = 'form-group';
+            stdinGroup.innerHTML = '<label>Standard input (_stdin)</label><div class="desc">Piped to the command on stdin. Leave empty for none.</div>';
+            const stdinInput = document.createElement('textarea');
+            stdinInput.name = '_stdin';
+            stdinInput.rows = 3;
+            stdinInput.placeholder = 'e.g. {"name": "value"}';
+            stdinGroup.appendChild(stdinInput);
+            form.appendChild(stdinGroup);
 
             const flagsContainer = document.createElement('div');
             for (const [key, def] of Object.entries(schema)) {
@@ -802,6 +822,9 @@ if (import.meta.main) {
                 const payload = {};
                 const argsVal = form.querySelector('[name="_args"]').value;
                 if (argsVal.trim()) payload._args = tokenizeArgs(argsVal);
+
+                const stdinVal = form.querySelector('[name="_stdin"]').value;
+                if (stdinVal) payload._stdin = stdinVal; // sent verbatim, not tokenized
 
                 form.querySelectorAll('input[type="checkbox"]').forEach(cb => {
                     if (cb.checked) payload[cb.name] = true;
@@ -972,9 +995,18 @@ if (import.meta.main) {
             }
 
             const cliArgs = buildCLIArgs(payload, schema);
-            if (isDebug) console.log(`[Bashful] Executing: ${cmdName} ${cliArgs.join(' ')}`);
+            const stdin = typeof payload._stdin === 'string' ? payload._stdin : undefined;
+            if (isDebug) {
+              console.log(`[Bashful] Executing: ${cmdName} ${cliArgs.join(' ')}${stdin ? ` (+${stdin.length} bytes on stdin)` : ''}`);
+            }
 
-            const proc = safeSpawn([cmdName, ...cliArgs], { stdout: 'pipe', stderr: 'pipe' });
+            const proc = safeSpawn([cmdName, ...cliArgs], {
+              stdout: 'pipe',
+              stderr: 'pipe',
+              // Without a body, close stdin rather than inheriting the server's —
+              // a command that reads stdin would otherwise hang forever.
+              stdin: stdin === undefined ? 'ignore' : new TextEncoder().encode(stdin),
+            });
             inFlight++;
 
             let timedOut = false;

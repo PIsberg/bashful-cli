@@ -44,9 +44,12 @@ The entire application lives in a single file: `bashful.ts`.
 
 **Payload conventions (POST `/<command>`):**
 - `_args`: positional arguments (string or string array)
+- `_stdin`: string piped to the command's stdin. Absent → stdin is closed, not inherited (else a stdin-reading tool hangs).
 - Boolean flags: `{ "silent": true }` → `--silent`
 - Value flags: `{ "output": "file.html" }` → `--output file.html`
-- Unknown single-char keys fall back to `-x` short-flag style.
+- Array values repeat the flag: `{ "header": ["a", "b"] }` → `--header a --header b`
+- Unknown single-char keys fall back to `-x` short-flag style; objects are rejected with 400.
+- `Accept: application/json` buffers and returns `{exitCode, stdout, stderr, timedOut}` instead of streaming.
 
 **Multiple commands:** Separate commands with `\|` (escaped pipe character). Each segment becomes its own endpoint and tab in the UI.
 - `bashful.ts curl \| wget` — two endpoints: `/curl` and `/wget`

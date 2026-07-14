@@ -377,6 +377,15 @@ describe('buildCLIArgs', () => {
   test('numeric positional args are accepted', () => {
     expect(buildCLIArgs({ _args: [8080] }, {})).toEqual(['8080']);
   });
+
+  test('_stdin is not emitted as a flag', () => {
+    expect(buildCLIArgs({ _stdin: 'hello', silent: true }, curlSchema)).toEqual(['--silent']);
+  });
+
+  test('a non-string _stdin is rejected', () => {
+    expect(() => buildCLIArgs({ _stdin: { a: 1 } }, {})).toThrow(PayloadError);
+    expect(() => buildCLIArgs({ _stdin: 42 }, {})).toThrow(/must be a string/);
+  });
 });
 
 // ── Config parsing ────────────────────────────────────────────────────────────
@@ -637,6 +646,11 @@ describe('extractFlagNames', () => {
 
   test('an array counts once', () => {
     expect(extractFlagNames({ header: ['A', 'B'] })).toEqual(['header']);
+  });
+
+  test('_stdin is governable — it is input to the command like any flag', () => {
+    expect(extractFlagNames({ _stdin: 'data' })).toEqual(['_stdin']);
+    expect(extractFlagNames({ _stdin: '' })).toEqual([]);
   });
 });
 
@@ -1237,6 +1251,23 @@ describe('Integration: process lifecycle', () => {
     };
     expect(body.exitCode).toBe(3);
   });
+
+  test('_stdin is piped to the command', async () => {
+    const body = await (await json({
+      _args: ['--print', 'await Bun.stdin.text()'],
+      _stdin: 'piped-in-payload',
+    })).json() as { stdout: string };
+    expect(body.stdout).toContain('piped-in-payload');
+  });
+
+  test('a command that reads stdin does not hang when none is given', async () => {
+    // stdin is closed rather than inherited, so this returns immediately.
+    const body = await (await json({ _args: ['--print', '(await Bun.stdin.text()).length'] })).json() as {
+      exitCode: number; stdout: string;
+    };
+    expect(body.exitCode).toBe(0);
+    expect(body.stdout).toContain('0');
+  }, 10_000);
 
   test('stdout and stderr are separated in JSON mode', async () => {
     const body = await (await json({ _args: ['--print', 'console.error("to-stderr"); "to-stdout"'] })).json() as {

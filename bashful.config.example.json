@@ -9,7 +9,11 @@
     },
     "curl": {
       "deny": ["upload-file"],
-      "denyCombinations": [["output", "proxy"]]
+      "denyCombinations": [["output", "proxy"]],
+      "values": {
+        "_args": "^https://api\\.example\\.com/",
+        "output": "^/tmp/"
+      }
     },
     "wget": {
       "allow": ["_args", "quiet", "output-document"]

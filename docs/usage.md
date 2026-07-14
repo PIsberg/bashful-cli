@@ -121,7 +121,11 @@ A `--config` path that doesn't exist is an error and Bashful exits; the implicit
       "allow": ["_args", "silent", "output"],
       "deny": ["upload-file"],
       "denyCombinations": [["output", "proxy"]],
-      "allowCombinations": [["_args", "silent"], ["_args", "output"]]
+      "allowCombinations": [["_args", "silent"], ["_args", "output"]],
+      "values": {
+        "_args": "^https://api\\.example\\.com/",
+        "output": "^/tmp/"
+      }
     }
   }
 }
@@ -135,6 +139,20 @@ A `--config` path that doesn't exist is an error and Bashful exits; the implicit
 | `flags.<cmd>.allow` / `.deny` | Individual flags. Naming an `allow` list whitelists that command's flags even in blacklist mode. |
 | `flags.<cmd>.denyCombinations` | Flag sets. Rejected if a request uses **all** flags of any listed set; each flag remains fine on its own. |
 | `flags.<cmd>.allowCombinations` | Flag sets. Rejected unless every flag a request uses fits inside **one** listed set. |
+| `flags.<cmd>.values` | Flag → regex its value must match. Every value of a repeated flag must match. |
+
+### Constraining values
+
+Allowing a flag is not the same as constraining it. `"allow": ["output"]` lets the caller write to *any* path, and allowing `_args` lets `curl` fetch *any* URL. `values` closes that:
+
+```json
+"values": {
+  "_args": "^https://api\\.example\\.com/",
+  "output": "^/tmp/"
+}
+```
+
+Now `curl` may only fetch that one host and only write under `/tmp`. Patterns are unanchored JavaScript regexes tested against each value, so anchor them yourself (`^…$`) — an unanchored `/tmp/` would happily match `/etc/../tmp/../etc/passwd`. A pattern for a flag used as a bare boolean has no value to check and is inert. Broken regexes are rejected when the config loads, not on the first request.
 
 Rules name **payload keys**, not CLI spellings: write `output`, not `--output`. Positional arguments are governed under the name `_args`. `"*"` inside any list means "everything". **Deny always beats allow.** A flag set to `false` builds to nothing, so the rules ignore it.
 

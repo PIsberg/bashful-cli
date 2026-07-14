@@ -103,7 +103,8 @@ The policy layer is four small pure functions over a validated config:
 - **`effectiveFlagPolicy(cmd, config)`** merges the `"*"` wildcard policy with the command's own — deny lists concatenate, allow lists union.
 - **`authorizeCommand(cmd, config)`** gates the command itself. Deny list first; then, in `whitelist` mode, membership in the allow list.
 - **`authorizeFlags(cmd, flags, config)`** gates a set of flags, in a deliberate order: individual denies, then `denyCombinations`, then the allow list, then `allowCombinations`. **Deny is evaluated before allow at every level**, so no combination of rules can make an explicitly denied flag reachable.
-- **`authorizeRequest(cmd, payload, config)`** composes the two for one HTTP request.
+- **`authorizeValues(cmd, payload, config)`** gates the *values* those flags carry, against per-flag regexes. This is what makes a whitelist contain anything: allowing `--output` is meaningless if the caller chooses the path, and allowing `_args` is meaningless if the caller chooses the URL. Patterns are compiled at config load, so a broken regex fails at startup rather than silently at request time — a policy that throws mid-request is a policy that might not be enforced.
+- **`authorizeRequest(cmd, payload, config)`** composes all three for one HTTP request, in order: command, flags, then values.
 
 The two combination rules are set operations over the flags a request actually emits. A `denyCombinations` entry matches when the request is a **superset** of the listed set — `["output", "proxy"]` blocks a request using both plus anything else, while either alone stays legal. `allowCombinations` inverts that: the request's flags must be a **subset** of at least one listed set, so two individually-legal flags drawn from two different sets are rejected together.
 

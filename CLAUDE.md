@@ -52,7 +52,7 @@ The entire application lives in a single file: `bashful.ts`.
 - `bashful.ts curl \| wget` — two endpoints: `/curl` and `/wget`
 - `bashful.ts curl --help \| wget --help` — pipe mode per segment: runs the full command as-is to get help text (useful when `--help` alone fails or outputs to stderr)
 
-**Access control:** an optional config file gates both commands and flags. `mode` is `blacklist` (allow unless denied) or `whitelist` (deny unless allowed). `commands.allow`/`deny` gate whole commands; `flags.<cmd>.allow`/`deny` gate individual flags; `flags.<cmd>.denyCombinations`/`allowCombinations` gate *sets* of flags used together. The `"*"` key under `flags` applies to every command; `"*"` inside a list means "everything". Rules name payload keys (`output`, `_args`), not CLI spellings (`--output`). Deny always beats allow. See `bashful.config.example.json` and the README for details.
+**Access control:** an optional config file gates commands, flags, and flag values. `mode` is `blacklist` (allow unless denied) or `whitelist` (deny unless allowed). `commands.allow`/`deny` gate whole commands; `flags.<cmd>.allow`/`deny` gate individual flags; `flags.<cmd>.denyCombinations`/`allowCombinations` gate *sets* of flags used together; `flags.<cmd>.values` maps a flag to a regex its value must match. The `"*"` key under `flags` applies to every command; `"*"` inside a list means "everything". Rules name payload keys (`output`, `_args`), not CLI spellings (`--output`). Deny always beats allow. See `bashful.config.example.json` and `docs/usage.md`.
 
 **`--debug` flag:** logs startup time, number of parsed flags, config load, blocked requests, and each execution command.
 

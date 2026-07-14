@@ -172,7 +172,8 @@ See [`bashful.config.example.json`](bashful.config.example.json) for a working s
       "allow": ["_args", "silent", "output"],
       "deny": ["upload-file"],
       "denyCombinations": [["output", "proxy"]],
-      "allowCombinations": [["_args", "silent"], ["_args", "output"]]
+      "allowCombinations": [["_args", "silent"], ["_args", "output"]],
+      "values": { "_args": "^https://api\\.example\\.com/", "output": "^/tmp/" }
     }
   }
 }
@@ -186,6 +187,7 @@ See [`bashful.config.example.json`](bashful.config.example.json) for a working s
 | `flags.<cmd>.allow` / `.deny` | Individual flags. Naming an `allow` list whitelists that command's flags even in blacklist mode. |
 | `flags.<cmd>.denyCombinations` | List of flag sets. A request is rejected if it uses **all** flags of any listed set — the flags remain fine on their own. |
 | `flags.<cmd>.allowCombinations` | List of flag sets. A request is rejected unless every flag it uses fits inside **one** listed set. |
+| `flags.<cmd>.values` | Flag → regex its value must match, e.g. `{"output": "^/tmp/", "_args": "^https://api\\.example\\.com/"}`. Allowing a flag doesn't constrain it; this does. |
 
 Rules use **payload key names**, not CLI spellings: write `output`, not `--output`. Positional arguments are governed under the name `_args`, and `"*"` in any list means "everything". Full reference: [docs/usage.md](docs/usage.md#access-control).
 

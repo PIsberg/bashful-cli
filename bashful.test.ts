@@ -18,6 +18,8 @@ import {
   effectiveFlagPolicy,
   authorizeCommand,
   authorizeFlags,
+  authorizeValues,
+  extractFlagValues,
   authorizeRequest,
   filterSchema,
   DEFAULT_CONFIG,
@@ -726,6 +728,78 @@ describe('authorizeFlags', () => {
   });
 });
 
+// ── authorizeValues ───────────────────────────────────────────────────────────
+
+describe('extractFlagValues', () => {
+  test('collects the values a payload would emit', () => {
+    expect(extractFlagValues({ output: 'f.txt', retry: 3 })).toEqual({ output: ['f.txt'], retry: ['3'] });
+  });
+
+  test('an array yields every value', () => {
+    expect(extractFlagValues({ header: ['A', 'B'] })).toEqual({ header: ['A', 'B'] });
+  });
+
+  test('bare booleans emit no value to check', () => {
+    expect(extractFlagValues({ silent: true, verbose: 'true', quiet: false })).toEqual({});
+  });
+});
+
+describe('authorizeValues', () => {
+  test('allows anything when no patterns are configured', () => {
+    expect(authorizeValues('curl', { output: '/etc/passwd' }, DEFAULT_CONFIG).allowed).toBe(true);
+  });
+
+  test('constrains a flag value to its pattern', () => {
+    const config = normalizeConfig({ flags: { curl: { values: { output: '^/tmp/' } } } });
+    expect(authorizeValues('curl', { output: '/tmp/out.html' }, config).allowed).toBe(true);
+
+    const decision = authorizeValues('curl', { output: '/etc/passwd' }, config);
+    expect(decision.allowed).toBe(false);
+    expect(decision.allowed === false && decision.reason).toContain('/etc/passwd');
+  });
+
+  test('constrains positional args — the URL curl is allowed to fetch', () => {
+    const config = normalizeConfig({ flags: { curl: { values: { _args: '^https://api\\.example\\.com/' } } } });
+    expect(authorizeValues('curl', { _args: ['https://api.example.com/v1/users'] }, config).allowed).toBe(true);
+    expect(authorizeValues('curl', { _args: ['https://evil.example/'] }, config).allowed).toBe(false);
+  });
+
+  test('every element of an array must match', () => {
+    const config = normalizeConfig({ flags: { curl: { values: { _args: '^https://' } } } });
+    expect(authorizeValues('curl', { _args: ['https://a.test', 'http://b.test'] }, config).allowed).toBe(false);
+  });
+
+  test('a flag used as a bare boolean has no value to constrain', () => {
+    const config = normalizeConfig({ flags: { curl: { values: { output: '^/tmp/' } } } });
+    expect(authorizeValues('curl', { output: true }, config).allowed).toBe(true);
+  });
+
+  test('a pattern for an unused flag is inert', () => {
+    const config = normalizeConfig({ flags: { curl: { values: { output: '^/tmp/' } } } });
+    expect(authorizeValues('curl', { silent: true }, config).allowed).toBe(true);
+  });
+
+  test("a command's pattern overrides the wildcard's for the same flag", () => {
+    const config = normalizeConfig({
+      flags: { '*': { values: { output: '^/tmp/' } }, curl: { values: { output: '^/var/' } } },
+    });
+    expect(authorizeValues('curl', { output: '/var/x' }, config).allowed).toBe(true);
+    expect(authorizeValues('curl', { output: '/tmp/x' }, config).allowed).toBe(false);
+    // wget has no override, so it still inherits the wildcard.
+    expect(authorizeValues('wget', { output: '/tmp/x' }, config).allowed).toBe(true);
+  });
+
+  test('a broken regex is rejected at config load, not at request time', () => {
+    expect(() => normalizeConfig({ flags: { curl: { values: { output: '[unclosed' } } } }))
+      .toThrow(/not a valid regex/);
+  });
+
+  test('a non-string pattern is rejected', () => {
+    expect(() => normalizeConfig({ flags: { curl: { values: { output: 3 } } } }))
+      .toThrow(/must be a regex string/);
+  });
+});
+
 // ── authorizeRequest ──────────────────────────────────────────────────────────
 
 describe('authorizeRequest', () => {
@@ -754,6 +828,16 @@ describe('authorizeRequest', () => {
   test('a false-valued flag does not trip a combination rule', () => {
     // `silent: false` builds to nothing, so this is really just `--output f`.
     expect(authorizeRequest('curl', { silent: false, output: 'f' }, config).allowed).toBe(true);
+  });
+
+  test('value patterns are enforced as part of the full request check', () => {
+    const strict = normalizeConfig({
+      mode: 'whitelist',
+      commands: { allow: ['curl'] },
+      flags: { curl: { allow: ['_args', 'output'], values: { _args: '^https://ok\\.test/' } } },
+    });
+    expect(authorizeRequest('curl', { _args: ['https://ok.test/a'] }, strict).allowed).toBe(true);
+    expect(authorizeRequest('curl', { _args: ['https://evil.test/a'] }, strict).allowed).toBe(false);
   });
 });
 
@@ -937,6 +1021,7 @@ describe('Integration: config enforcement', () => {
         bun: {
           deny: ['eval'],
           denyCombinations: [['version', 'revision']],
+          values: { _args: '^--(print|version)$' },
         },
       },
     }));
@@ -987,6 +1072,17 @@ describe('Integration: config enforcement', () => {
   test('a denied flag is also blocked via GET query params', async () => {
     const res = await fetch(`${baseUrl}/bun?eval=1%2B1`);
     expect(res.status).toBe(403);
+  });
+
+  test('a positional arg matching its value pattern is allowed', async () => {
+    const res = await post({ _args: ['--version'] });
+    expect(res.status).toBe(200);
+  });
+
+  test('a positional arg violating its value pattern is rejected with 403', async () => {
+    const res = await post({ _args: ['--eval', 'process.exit(1)'] });
+    expect(res.status).toBe(403);
+    expect((await res.json() as { reason: string }).reason).toMatch(/does not match the required pattern/);
   });
 
   test('refuses to start when wrapping a denied command', async () => {

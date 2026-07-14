@@ -116,6 +116,8 @@ export type FlagPolicy = {
   deny?: string[];
   allowCombinations?: string[][];
   denyCombinations?: string[][];
+  /** Flag name → regex the flag's value(s) must match. Use '_args' for positionals. */
+  values?: Record<string, string>;
 };
 
 export type BashfulConfig = {
@@ -181,6 +183,27 @@ export function normalizeConfig(raw: unknown): BashfulConfig {
       if (p.deny != null) policy.deny = asStringArray(p.deny, `flags.${cmd}.deny`);
       if (p.allowCombinations != null) policy.allowCombinations = asCombinations(p.allowCombinations, `flags.${cmd}.allowCombinations`);
       if (p.denyCombinations != null) policy.denyCombinations = asCombinations(p.denyCombinations, `flags.${cmd}.denyCombinations`);
+      if (p.values != null) {
+        if (typeof p.values !== 'object' || Array.isArray(p.values)) {
+          throw new Error(`config: 'flags.${cmd}.values' must be an object of flag → regex`);
+        }
+        const values: Record<string, string> = {};
+        for (const [flag, pattern] of Object.entries(p.values as Record<string, unknown>)) {
+          if (typeof pattern !== 'string') {
+            throw new Error(`config: 'flags.${cmd}.values.${flag}' must be a regex string`);
+          }
+          // Compile now so a broken pattern fails at startup, not on the first
+          // request — a policy that throws at request time is a policy that
+          // might not be enforced.
+          try {
+            new RegExp(pattern);
+          } catch (err: any) {
+            throw new Error(`config: 'flags.${cmd}.values.${flag}' is not a valid regex — ${err.message}`);
+          }
+          values[flag] = pattern;
+        }
+        policy.values = values;
+      }
       flags[cmd] = policy;
     }
   }
@@ -211,7 +234,55 @@ export function effectiveFlagPolicy(command: string, config: BashfulConfig): Fla
     deny: merge(wildcard.deny, specific.deny),
     allowCombinations: merge(wildcard.allowCombinations, specific.allowCombinations),
     denyCombinations: merge(wildcard.denyCombinations, specific.denyCombinations),
+    // A command's own pattern for a flag overrides the wildcard's.
+    values: wildcard.values || specific.values
+      ? { ...wildcard.values, ...specific.values }
+      : undefined,
   };
+}
+
+/** The values a payload would emit for one flag, as strings. Bare booleans emit none. */
+export function extractFlagValues(payload: Record<string, any>): Record<string, string[]> {
+  const values: Record<string, string[]> = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if (value == null) continue;
+    const items = Array.isArray(value) ? value : [value];
+    const rendered = items
+      .filter(item => typeof item !== 'boolean' && item !== 'true' && item !== 'false')
+      .map(item => String(item));
+    if (rendered.length > 0) values[key] = rendered;
+  }
+  return values;
+}
+
+/**
+ * Check flag values against their configured patterns. This is what makes a
+ * whitelist actually contain something: allowing '--output' is meaningless if
+ * the caller picks the path.
+ */
+export function authorizeValues(
+  command: string,
+  payload: Record<string, any>,
+  config: BashfulConfig
+): Decision {
+  const patterns = effectiveFlagPolicy(command, config).values;
+  if (!patterns) return ALLOWED;
+
+  const values = extractFlagValues(payload);
+  for (const [flag, pattern] of Object.entries(patterns)) {
+    const used = values[flag];
+    if (!used) continue; // flag absent, or used as a bare boolean — no value to check
+    const regex = new RegExp(pattern);
+    for (const value of used) {
+      if (!regex.test(value)) {
+        return {
+          allowed: false,
+          reason: `value '${value}' for '${flag}' does not match the required pattern ${pattern} for command '${command}'`,
+        };
+      }
+    }
+  }
+  return ALLOWED;
 }
 
 /**
@@ -306,11 +377,15 @@ export function filterSchema(
   return filtered;
 }
 
-/** Full check for one request: the command, then the flags it carries. */
+/** Full check for one request: the command, then its flags, then their values. */
 export function authorizeRequest(command: string, payload: Record<string, any>, config: BashfulConfig): Decision {
   const cmdDecision = authorizeCommand(command, config);
   if (!cmdDecision.allowed) return cmdDecision;
-  return authorizeFlags(command, extractFlagNames(payload), config);
+
+  const flagDecision = authorizeFlags(command, extractFlagNames(payload), config);
+  if (!flagDecision.allowed) return flagDecision;
+
+  return authorizeValues(command, payload, config);
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────

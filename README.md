@@ -6,6 +6,7 @@
 [![Bun >= 1.0](https://img.shields.io/badge/Bun-%3E%3D%201.0-black?logo=bun)](https://bun.sh/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-blue)](https://bun.sh/)
 [![Lines of Code](https://www.aschey.tech/tokei/github/PIsberg/bashful-cli?languages=TypeScript&category=code)](https://github.com/PIsberg/bashful-cli)
+[![Donate](https://img.shields.io/badge/Donate-PayPal-0079C1?logo=paypal&logoColor=white)](https://paypal.me/isbergpeter)
 
 **Bashful** gives your CLI tools a REST API — no code required.
 
